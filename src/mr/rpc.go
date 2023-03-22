@@ -23,6 +23,18 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type TaskArgs struct {
+	TaskType int      // 0: map, 1: reduce
+	ID int
+}
+
+type TaskReply struct {
+	TaskType int      // 0: map, 1: reduce
+	ID int
+	FileName string
+	NReduce int       // number of all reduce tasks
+	NMap int       // number of all reduce tasks
+}
 
 
 // Cook up a unique-ish UNIX-domain socket name
