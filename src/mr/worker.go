@@ -38,57 +38,71 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-	reply, ok := requestTask()
-	fmt.Printf("Get task: %s\n", reply.FileName)
+	for {
+		reply, ok := requestTask()
 
-	if ok && reply.TaskType == 0 { // map task
-		intermediate := []KeyValue{}
-		file, err := os.Open(reply.FileName)
-		if err != nil {
-			fmt.Printf("cannot open %s", reply.FileName)
+		if !ok { // jobs all done, exit
+			os.Exit(0)
 		}
-		content, err := ioutil.ReadAll(file)
-		if err != nil {
-			fmt.Printf("cannot read %s", reply.FileName)
+
+		if ok && reply.TaskType == MapTask { 
+			doMap(mapf, &reply)
 		}
-		file.Close()
-		kva := mapf(reply.FileName, string(content))
-		intermediate = append(intermediate, kva...)
-		createImd(intermediate, &reply)
-		
-		ok := submitTask(&reply)
-		if ok {
-			fmt.Printf("Submit task success: %s\n", reply.FileName)
-		} else {
-			fmt.Printf("Submit task fail: %s\n", reply.FileName)
+
+		if ok && reply.TaskType == ReduceTask { 
+			doReduce(reducef, &reply)
 		}
 	}
-	if ok && reply.TaskType == 1 { // reduce task
-		intermediate := []KeyValue{}
-		for i:=0; i<reply.NMap; i++ {
-			filename := fmt.Sprintf("./intermediate/mr-%d-%d", i, reply.ID)
-			fd, err := os.Open(filename)
+}
+
+func doMap(mapf func(string, string) []KeyValue, reply *TaskReply) {
+	file, err := os.Open(reply.FileName)
+	if err != nil {
+		log.Fatalf("cannot open %s", reply.FileName)
+	}
+
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %s", reply.FileName)
+	}
+	file.Close()
+
+	kva := mapf(reply.FileName, string(content))
+	createImd(kva, reply)
+
+	ok := submitTask(reply)
+	if !ok {
+		log.Fatalf("Submit mtask fail: %d\n", reply.TaskID)
+	}
+}
+
+func doReduce(reducef func(string, []string) string, reply *TaskReply) {
+	intermediate := []KeyValue{}
+	for i := 0; i < reply.NMap; i++ { // load all the intermediate files
+		filename := fmt.Sprintf("mr-%d-%d", i, reply.TaskID)
+		fd, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open %s", filename)
+		}
+
+		dec := json.NewDecoder(fd)
+		var kv KeyValue
+		for dec.More() {
+			err := dec.Decode(&kv)
 			if err != nil {
-				fmt.Printf("cannot open %s", filename)
+				log.Fatalf("cannot decode %s", filename)
 			}
-
-			dec := json.NewDecoder(fd)
-			for {
-				var kv KeyValue
-				if err := dec.Decode(&kv); err != nil {
-				  break
-				}
-				intermediate = append(intermediate, kv)
-			}
+			intermediate = append(intermediate, kv)
 		}
-		
-		sort.Sort(ByKey(intermediate))
 	}
 
+	sort.Sort(ByKey(intermediate))
+	createOutput(intermediate, reply, reducef)
 
-	// uncomment to send the Example RPC to the coordinator.
-	//CallExample()
-
+	ok := submitTask(reply)
+	if !ok {
+		log.Fatalf("Submit rtask fail: %d\n", reply.TaskID)
+	}
 }
 
 // ask coordinator for new task
@@ -96,60 +110,105 @@ func requestTask() (TaskReply, bool) {
 	args := TaskArgs{}
 	reply := TaskReply{}
 	ok := call("Coordinator.AssignTask", &args, &reply)
-	if !ok {
-		fmt.Printf("call AssignTask failed!\n")
-	}
+
 	return reply, ok
 }
 
 // call done when a task was finished
 func submitTask(task *TaskReply) bool {
 	args := TaskArgs{
-		ID: task.ID,
+		TaskID: task.TaskID,
 		TaskType: task.TaskType,
 	}
 	reply := TaskReply{}
 	ok := call("Coordinator.CheckoutTask", &args, &reply)
-	if !ok {
-		fmt.Printf("call CheckoutTask failed!\n")
-	}
 	return ok
 }
 
 // create intermediate files for a map task
 func createImd(intermediate []KeyValue, reply *TaskReply) {
 	// write to intermdediate file
-	tmpfiles := make([]*os.File, reply.NReduce)
+	tmpfiles := make([]*os.File, reply.NReduce)  // tmp file descriptors
+	encs := make([]*json.Encoder, reply.NReduce) // json encoder descriptors
+
 	for i := range tmpfiles {
-		file, err := ioutil.TempFile("./tmp", fmt.Sprintf("mr-%d-", reply.ID))
+		filename := fmt.Sprintf("mr-%d-", reply.TaskID)
+		file, err := ioutil.TempFile("", filename)
 		if err != nil {
-			panic(err)
+			log.Fatalf("Can not create tmp file %s", filename)
 		}
 		tmpfiles[i] = file
+		encs[i] = json.NewEncoder(file)
 	}
-	
+
 	for _, kv := range intermediate {
-		i := ihash(kv.Key) % reply.NReduce  // reduce partition index
-		enc := json.NewEncoder(tmpfiles[i])
-		err := enc.Encode(&kv)
+		i := ihash(kv.Key) % reply.NReduce // reduce partition index
+		err := encs[i].Encode(&kv)
 		if err != nil {
-			panic(err)
+			log.Fatalf("Can not encode %v", kv)
 		}
 	}
 
 	for i, v := range tmpfiles {
 		// close the tmp file
 		if err := v.Close(); err != nil {
-			panic(err)
+			log.Fatalf("Can not close tmp file")
 		}
 		// rename the tmp file to the final destination.
-		oname := fmt.Sprintf("./intermediate/mr-%d-%d", reply.ID, i)
+		oname := fmt.Sprintf("mr-%d-%d", reply.TaskID, i)
 		if err := os.Rename(v.Name(), oname); err != nil {
-			panic(err)
+			log.Fatalf("Can not rename file %s", oname)
 		}
 		// clean the tmp file when done
-		os.Remove(v.Name()) 
+		os.Remove(v.Name())
 	}
+}
+
+// create the output files for reduce tasks
+func createOutput(intermediate []KeyValue, reply *TaskReply,
+	reducef func(string, []string) string) {
+
+	tmpfile := fmt.Sprintf("tmpout-%d", reply.TaskID)
+	tfd, err := ioutil.TempFile("", tmpfile)
+	if err != nil {
+		log.Fatalf("Can not create tmp file %s", tmpfile)
+	}
+
+	//
+	// call Reduce on each distinct key in intermediate[],
+	// and print the result to mr-out-X.
+	//
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		_, err = fmt.Fprintf(tfd, "%v %v\n", intermediate[i].Key, output)
+		if err != nil {
+			log.Fatalf("Can not write to file")
+		}
+
+		i = j
+	}
+
+	// rename tmp to mr-out-Y
+	oname := fmt.Sprintf("mr-out-%d", reply.TaskID)
+	ofile, _ := os.Create(oname)
+	defer ofile.Close()
+	if err := os.Rename(tfd.Name(), oname); err != nil {
+		log.Fatalf("Can not rename file %s", oname)
+	}
+	// clean the tmp file when done
+	tfd.Close()
+	os.Remove(tfd.Name())
 }
 
 // example function to show how to make an RPC call to the coordinator.
@@ -196,6 +255,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	//fmt.Println(err)
 	return false
 }

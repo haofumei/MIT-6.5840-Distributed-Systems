@@ -24,16 +24,17 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 type TaskArgs struct {
-	TaskType int      // 0: map, 1: reduce
-	ID int
+	TaskType int      
+	TaskID int
+	WorkerID int
 }
 
 type TaskReply struct {
-	TaskType int      // 0: map, 1: reduce
-	ID int
+	TaskType int      
+	TaskID int
 	FileName string
 	NReduce int       // number of all reduce tasks
-	NMap int       // number of all reduce tasks
+	NMap int       // number of all map tasks
 }
 
 
