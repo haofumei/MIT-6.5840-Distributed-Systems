@@ -16,9 +16,11 @@ const (
 	unassigned = 0
 	assigned   = 1
 	finished   = 2
-	taskTimeout = 10 // refresh task hasn't done after 10s
 	MapTask = 3
 	ReduceTask = 4
+	NoTask = 5       // indicate no taks available now, worker must wait
+	Done = 6
+	taskTimeout = 10 // refresh task hasn't done after 10s
 )
 
 type Task struct {
@@ -50,6 +52,7 @@ func (e PleaseExit) Error() string {
 // assign map task or reduce task to worker
 func (c *Coordinator) AssignTask(args *TaskArgs, reply *TaskReply) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.mavailable > 0 { // assign map task
 		for i, t := range c.mTasks {
 			if t.state == unassigned {
@@ -60,12 +63,11 @@ func (c *Coordinator) AssignTask(args *TaskArgs, reply *TaskReply) error {
 
 				c.mavailable--
 				c.mTasks[i].state = assigned
-				c.mu.Unlock()
 				go c.refresh(reply.TaskID, MapTask)
 				return nil
 			}
 		}
-	} else if c.ravailable > 0 {
+	} else if c.mdone == len(c.mTasks) && c.ravailable > 0 {
 		for i, t := range c.rTasks {
 			if t.state == unassigned {
 				reply.TaskID = t.id
@@ -75,30 +77,37 @@ func (c *Coordinator) AssignTask(args *TaskArgs, reply *TaskReply) error {
 
 				c.ravailable--
 				c.rTasks[i].state = assigned
-				c.mu.Unlock()
 				go c.refresh(reply.TaskID, ReduceTask)
 				return nil
 			}
 		}
+	} else if c.rdone == len(c.rTasks) { 
+		reply.TaskType = Done
+		return nil
+	} else { // worker has to wait
+		reply.TaskType = NoTask
+		return nil
 	}
-	c.mu.Unlock()
-	return PleaseExit{"Jobs done! Please exit"}
+	return nil
 }
 
 // assign map task or reduce task to worker
 func (c *Coordinator) CheckoutTask(args *TaskArgs, reply *TaskReply) error {
-	
+	var task *Task
+
 	if args.TaskType == MapTask { 
 		c.mu.Lock()
-		if c.mTasks[args.TaskID].state != finished {
-			c.mTasks[args.TaskID].state = finished
+		task = &c.mTasks[args.TaskID]
+		if task.state != finished {
+			task.state = finished
 			c.mdone++
 		}
 		c.mu.Unlock()
 	} else { // reduce task
 		c.mu.Lock()
-		if c.rTasks[args.TaskID].state != finished {
-			c.rTasks[args.TaskID].state = finished
+		task = &c.rTasks[args.TaskID]
+		if task.state != finished {
+			task.state = finished
 			c.rdone++
 		}
 		c.mu.Unlock()

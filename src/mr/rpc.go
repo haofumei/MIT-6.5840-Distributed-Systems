@@ -26,7 +26,6 @@ type ExampleReply struct {
 type TaskArgs struct {
 	TaskType int      
 	TaskID int
-	WorkerID int
 }
 
 type TaskReply struct {

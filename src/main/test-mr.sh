@@ -276,6 +276,8 @@ then
 else
   echo '---' output changed after first worker exited
   echo '---' early exit test: FAIL
+  cat mr-wc-all-initial
+  cat mr-wc-all-final
   failed_any=1
 fi
 rm -f mr-*

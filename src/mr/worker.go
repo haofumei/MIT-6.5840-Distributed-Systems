@@ -9,6 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"sort"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -41,8 +42,12 @@ func Worker(mapf func(string, string) []KeyValue,
 	for {
 		reply, ok := requestTask()
 
-		if !ok { // jobs all done, exit
-			os.Exit(0)
+		if !ok { // Can not contact coordinator
+			return 
+		}
+
+		if ok && reply.TaskType == Done { // jobs all done, exit
+			return
 		}
 
 		if ok && reply.TaskType == MapTask { 
@@ -51,6 +56,10 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		if ok && reply.TaskType == ReduceTask { 
 			doReduce(reducef, &reply)
+		}
+
+		if ok && reply.TaskType == NoTask {
+			time.Sleep(time.Millisecond * 200)
 		}
 	}
 }
