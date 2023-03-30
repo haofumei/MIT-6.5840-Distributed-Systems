@@ -74,30 +74,30 @@ type Raft struct {
 
 	// Persistent state on all servers.
 	// Updated on stable storage before responding to RPCs.
-	currentTerm int        // latest term server has seen
-	votedFor    int        // candidateId that received vote in current term
-	log         []LogEntry // log entries; each entry contains command for state machine,
-	// and term when entry was received by leader
-	// first index is 1
+	currentTerm int               // latest term server has seen
+	votedFor    int               // candidateId that received vote in current term
+	log         []LogEntry        // log entries; each entry contains command for state machine,
+						          // and term when entry was received by leader
+						          // first index is 1
 
 	// Volatile state on all server.
-	commitIndex  int   // index of highest log entry known to be committed
-	lastApplied  int   // index of highest log entry applied to state machine
-	currentState int32 // follower? leader? candidate?
-	voteCnt      int   // count for received votes
+	commitIndex  int              // index of highest log entry known to be committed
+	lastApplied  int              // index of highest log entry applied to state machine
+	currentState int32            // follower? leader? candidate?
+	voteCnt      int              // count for received votes
 
 	// Volatile state on leaders.
 	// Reinitialized after election.
-	nextIndex []int // for each server, index of the next log entry to send to that server
-	// initialized to leader last log index + 1
-	matchIndex []int // for each server, index of highest log entry known to be replicated on server
-	// initialized to 0, increases monotonically
+	nextIndex []int               // for each server, index of the next log entry to send to that server
+					              // initialized to leader last log index + 1
+	matchIndex []int              // for each server, index of highest log entry known to be replicated on server
+	                              // initialized to 0, increases monotonically
 
 	// Channels
-	heartbeat   chan int // signal indicates leader is alive
-	grantVote   chan int // signal indicates electing leader
-	winElection chan int // signal indicates candidate win election
-	convertToF  chan int // signal indicates convert to follower
+	heartbeat   chan int          // signal indicates leader is alive
+	grantVote   chan int          // signal indicates electing leader
+	winElection chan int          // signal indicates candidate win election
+	convertToF  chan int          // signal indicates convert to follower
 }
 
 // return currentTerm and whether this server
@@ -245,12 +245,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// filer late response while me is not candidate or next election has began
-	if rf.currentState != candidate || args.Term != rf.currentTerm {
+	// filer late response 
+	if args.Term != rf.currentTerm {
 		return false
 	}
 
-	// down level to follower
+	// if receiver's term > mine
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.convertToFollower()
@@ -306,8 +306,8 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int  // currentTerm, for leader to update itself
-	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	Term    int             // currentTerm, for leader to update itself
+	Success bool            // true if follower contained entry matching prevLogIndex and prevLogTerm
 }
 
 // Invoked by leader to replicate log entries, also used as heartbeat.
@@ -358,17 +358,17 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	defer rf.mu.Unlock()
 	DPrintf("%d(term: %d) is sending Append to %d", rf.me, rf.currentTerm, server)
 	// filer outdated response
-	if rf.currentState != leader || args.Term != rf.currentTerm {
+	if args.Term != rf.currentTerm {
 		return false
 	}
-	// down level to follower
+	// if receiver's term > mine
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.convertToFollower()
 		DPrintf("%d becomes follower due to send Append", rf.me)
 		return true
 	}
-
+	// index conflits, update corresponding index
 	if !reply.Success {
 		rf.nextIndex[server] -= 1
 		return true
