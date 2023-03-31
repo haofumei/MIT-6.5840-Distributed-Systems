@@ -55,9 +55,9 @@ While receiving RequestVote from candidate, remember to set voteFor = null if te
 
 1. Find the match index by prevLogIndex and prevLogItem.
 2. Replace the entries with given leader entries behind the match index.
-3. Update leader next Indices.
+3. Update leader nextIndex and matchIndex.
 
-**Election restriction:** 
+**Election restriction:**
 
 vote yes if last term <= candidate term, or same term but len(log) <= len(clog)
 
