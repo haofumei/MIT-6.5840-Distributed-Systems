@@ -185,7 +185,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.Term < rf.currentTerm || rf.killed() { // ignore lower term request
+	if args.Term < rf.currentTerm { // ignore lower term request
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
@@ -240,7 +240,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	 
-	if args.Term != rf.currentTerm || rf.killed() { // filter outdated response
+	if args.Term != rf.currentTerm { // filter outdated response
 		return false
 	}
 
@@ -263,7 +263,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 
-	if rf.currentState != candidate || rf.killed() {
+	if rf.currentState != candidate {
 		rf.mu.Unlock()
 		return
 	}
@@ -302,8 +302,6 @@ type AppendEntriesReply struct {
 	Term         int        // currentTerm, for leader to update itself
 	Success      bool       // true if follower contained entry matching prevLogIndex and prevLogTerm
 	XTerm        int		// term of conflicting entry or last term in follower's log
-	XIndex       int        // index of first entry of XTerm
-	XLen         int        // length of follower log
 }
 
 // Invoked by leader to replicate log entries, also used as heartbeat.
@@ -312,7 +310,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	
-	if args.Term < rf.currentTerm || rf.killed() { // refuse lower term request
+	if args.Term < rf.currentTerm { // refuse lower term request
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
@@ -343,8 +341,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			reply.XTerm = rf.log[args.PrevLogIndex].Term
 		}
-		reply.XIndex = leftBound(rf.log, reply.Term)
-		reply.XLen = len(rf.log)
 
 		DPrintf("%d reply %v and %d", rf.me, reply.Success, reply.Term)
 		return
@@ -377,7 +373,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	
-	if args.Term != rf.currentTerm || rf.killed() { // filer outdated response
+	if args.Term != rf.currentTerm { // filer outdated response
 		return false
 	}
 	
@@ -392,7 +388,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		if rf.log[leftmost].Term == reply.Term {
 			rf.nextIndex[server] = rightBound(rf.log, reply.XTerm) + 1
 		} else {
-			rf.nextIndex[server] = leftBound(rf.log, reply.XTerm)
+			rf.nextIndex[server] = leftmost
 		}
 		DPrintf("Confilt, %d update nextIndex of %d to %d", rf.me, server, rf.nextIndex[server])
 	} else if len(args.Entries) > 0 { // append entries
@@ -409,7 +405,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 func (rf *Raft) startLogSync() {
 	rf.mu.Lock()
-	if rf.currentState != leader || rf.killed() {
+	if rf.currentState != leader {
 		rf.mu.Unlock()
 		return
 	}
@@ -497,8 +493,8 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
 		// pause for a random amount of time between 50 and 350
-		electionTimeout := 200 + (rand.Int63() % 200)
-		heartBeatTimeout := 80
+		electionTimeout := 300 + (rand.Int63() % 300)
+		heartBeatTimeout := 100
 
 		rf.mu.Lock()
 		switch rf.currentState {
