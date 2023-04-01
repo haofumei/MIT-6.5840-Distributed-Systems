@@ -185,7 +185,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.Term < rf.currentTerm { // ignore lower term request
+	if args.Term < rf.currentTerm || rf.killed() { // ignore lower term request
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
@@ -240,7 +240,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	 
-	if args.Term != rf.currentTerm { // filter outdated response
+	if args.Term != rf.currentTerm || rf.killed() { // filter outdated response
 		return false
 	}
 
@@ -263,7 +263,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 
-	if rf.currentState != candidate {
+	if rf.currentState != candidate || rf.killed() {
 		rf.mu.Unlock()
 		return
 	}
@@ -299,8 +299,11 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int             // currentTerm, for leader to update itself
-	Success bool            // true if follower contained entry matching prevLogIndex and prevLogTerm
+	Term         int        // currentTerm, for leader to update itself
+	Success      bool       // true if follower contained entry matching prevLogIndex and prevLogTerm
+	XTerm        int		// term of conflicting entry or last term in follower's log
+	XIndex       int        // index of first entry of XTerm
+	XLen         int        // length of follower log
 }
 
 // Invoked by leader to replicate log entries, also used as heartbeat.
@@ -309,7 +312,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	
-	if args.Term < rf.currentTerm { // refuse lower term request
+	if args.Term < rf.currentTerm || rf.killed() { // refuse lower term request
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
@@ -330,22 +333,31 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.convertToFollower()
 	}
 
-	if rf.getLastLogIndex() < args.PrevLogIndex ||
+	if rf.getLastLogIndex() < args.PrevLogIndex || 
 		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // consistency check fails
 		reply.Success = false
 		reply.Term = rf.currentTerm
+
+		if rf.getLastLogIndex() < args.PrevLogIndex { // follower's log is shorter than PrevLogIndex
+			reply.XTerm = rf.getLastLogTerm()
+		} else {
+			reply.XTerm = rf.log[args.PrevLogIndex].Term
+		}
+		reply.XIndex = leftBound(rf.log, reply.Term)
+		reply.XLen = len(rf.log)
+
 		DPrintf("%d reply %v and %d", rf.me, reply.Success, reply.Term)
 		return
 	}
-
+	// if consistency check succeed
 	reply.Success = true
 	reply.Term = rf.currentTerm
 
-	if len(args.Entries) > 0 {
+	if len(args.Entries) > 0 { // append entries into log if not heartbeat
 		rf.log = append(rf.log[: args.PrevLogIndex + 1], args.Entries...)
 	}
 	
-	if args.LeaderCommit > rf.commitIndex {
+	if args.LeaderCommit > rf.commitIndex { 
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log))
 		rf.applyEntries()
 	}
@@ -365,7 +377,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	
-	if args.Term != rf.currentTerm { // filer outdated response
+	if args.Term != rf.currentTerm || rf.killed() { // filer outdated response
 		return false
 	}
 	
@@ -376,8 +388,13 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	}
 	
 	if !reply.Success { // index conflits, update corresponding index
-		rf.nextIndex[server] -= 1
-		// rf.fastBackup()
+		leftmost := leftBound(rf.log, reply.XTerm)
+		if rf.log[leftmost].Term == reply.Term {
+			rf.nextIndex[server] = rightBound(rf.log, reply.XTerm) + 1
+		} else {
+			rf.nextIndex[server] = leftBound(rf.log, reply.XTerm)
+		}
+		DPrintf("Confilt, %d update nextIndex of %d to %d", rf.me, server, rf.nextIndex[server])
 	} else if len(args.Entries) > 0 { // append entries
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
@@ -392,7 +409,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 func (rf *Raft) startLogSync() {
 	rf.mu.Lock()
-	if rf.currentState != leader {
+	if rf.currentState != leader || rf.killed() {
 		rf.mu.Unlock()
 		return
 	}
@@ -405,7 +422,6 @@ func (rf *Raft) startLogSync() {
 			argsList[i].LeaderCommit = rf.commitIndex
 			argsList[i].PrevLogIndex = rf.getPrevLogIndex(i)
 			argsList[i].PrevLogTerm = rf.getPrevLogTerm(i)
-
 			subEntries := rf.log[rf.nextIndex[i]:]
 			argsList[i].Entries = make([]LogEntry, len(subEntries))
 			copy(argsList[i].Entries, subEntries)
@@ -481,8 +497,8 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
 		// pause for a random amount of time between 50 and 350
-		electionTimeout := 250 + (rand.Int63() % 250)
-		heartBeatTimeout := 150
+		electionTimeout := 200 + (rand.Int63() % 200)
+		heartBeatTimeout := 80
 
 		rf.mu.Lock()
 		switch rf.currentState {
@@ -667,6 +683,7 @@ func (rf *Raft) tryCommit(server int) bool {
 }
 
 func (rf *Raft) applyEntries() {
+
 	for i := rf.lastApplied+1; i <= rf.commitIndex; i++ {
 		rf.applyCh <- ApplyMsg{
 			CommandValid: true,
@@ -676,3 +693,40 @@ func (rf *Raft) applyEntries() {
 	}
 	rf.lastApplied = rf.commitIndex
 }
+
+// Return index of the leftmost element in the array that 
+// is greater than or equal to x
+func leftBound(log []LogEntry, x int) int {
+    left := 0
+    right := len(log)
+
+    for left < right {
+        mid := (left + right) / 2
+
+        if log[mid].Term < x {
+            left = mid + 1
+        } else {
+            right = mid
+        }
+    }
+
+    return left
+}
+
+func rightBound(log []LogEntry, x int) int {
+    left := 0
+    right := len(log)
+
+    for left < right {
+        mid := (left + right) / 2
+
+        if log[mid].Term <= x {
+            left = mid + 1
+        } else {
+            right = mid
+        }
+    }
+
+    return left - 1
+}
+
