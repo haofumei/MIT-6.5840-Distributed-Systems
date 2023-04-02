@@ -355,16 +355,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.XLen = len(rf.log)
 		} else {
 			reply.XTerm = rf.log[args.PrevLogIndex].Term
+			/* linear search
 			for i := args.PrevLogIndex; i >= 0; i-- {
 				if rf.log[i].Term < reply.XTerm {
 					reply.XIndex = i + 1
 					break
 				}
-			}
+			}*/
+			reply.XIndex = leftBound(rf.log, reply.XTerm)
 			reply.XLen = len(rf.log)
 		}
 
-		//DPrintf("%d reply %v and %v", rf.me, reply.Success, rf.log)
+		DPrintf("%d reply %v and %v", rf.me, reply.Success, rf.log)
 		return
 	}
 	// if consistency check succeed
@@ -412,7 +414,14 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		if reply.XLen < args.PrevLogIndex + 1 { // follower's log is too short
 			rf.nextIndex[server] = reply.XLen
 		} else {
-			for i := rf.getLastLogIndex(); i >= 0; i-- {
+			pivot := rightBound(rf.log, reply.XTerm)
+			if rf.log[pivot].Term == reply.XTerm {
+				rf.nextIndex[server] = pivot + 1
+			} else {
+				rf.nextIndex[server] = reply.XIndex
+			}
+			/*
+			for i := args.PrevLogIndex; i >= 0; i-- {
 				if rf.log[i].Term == reply.XTerm { // XTerm exist in leader's log
 					rf.nextIndex[server] = i + 1
 					break
@@ -421,7 +430,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 					rf.nextIndex[server] = reply.XIndex
 					break
 				}
-			}
+			}*/
 		}
 		DPrintf("Confilt term %d, %d update nextIndex of %d to %d", reply.Term, rf.me, server, rf.nextIndex[server])
 	} else if len(args.Entries) > 0 { // append entries
@@ -465,6 +474,25 @@ func (rf *Raft) startLogSync() {
 			}(p)
 		}
 	}
+}
+
+/************************
+** InstallSnapshot RPC **
+*************************/
+type InstallSnapshotArgs struct {
+
+}
+
+type InstallSnapshotReply struct {
+
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+
+}
+
+func (rf *Raft) sendInstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
