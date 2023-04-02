@@ -839,6 +839,7 @@ func TestFigure82C(t *testing.T) {
 
 		if leader != -1 {
 			cfg.crash1(leader)
+			DPrintf("%d crash", leader)
 			nup -= 1
 		}
 
@@ -847,6 +848,7 @@ func TestFigure82C(t *testing.T) {
 			if cfg.rafts[s] == nil {
 				cfg.start1(s, cfg.applier)
 				cfg.connect(s)
+				DPrintf("%d rejoin", s)
 				nup += 1
 			}
 		}
@@ -856,6 +858,7 @@ func TestFigure82C(t *testing.T) {
 		if cfg.rafts[i] == nil {
 			cfg.start1(i, cfg.applier)
 			cfg.connect(i)
+			DPrintf("%d rejoin", i)
 		}
 	}
 
