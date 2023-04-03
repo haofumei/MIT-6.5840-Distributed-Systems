@@ -76,9 +76,9 @@ type Raft struct {
 	// Updated on stable storage before responding to RPCs.
 	currentTerm int        // latest term server has seen
 	votedFor    int        // candidateId that received vote in current term
-	log         []LogEntry // log entries; each entry contains command for state machine,
-	// and term when entry was received by leader
-	// first index is 1
+	log         []LogEntry // log entries, first index is 1
+	lastIncludedIndex int  // last log chunk ending index
+	lastIncludedTerm int   // term of lastIncludedIndex
 
 	// Volatile state on all server.
 	commitIndex  int   // index of highest log entry known to be committed
@@ -98,7 +98,8 @@ type Raft struct {
 	grantVote    chan bool // signal indicates electing leader
 	winElection  chan bool // signal indicates candidate win election
 	convertToF   chan bool // signal indicates convert to follower
-	applyEntries chan bool // signal indicates apply log entries
+	applyTrigger chan bool // signal indicates applier should work, either for logEntries or snapshot
+	applyCh		 chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -128,7 +129,9 @@ func (rf *Raft) persist() {
 	// persistent state
 	if e.Encode(rf.currentTerm) != nil ||
 		e.Encode(rf.votedFor) != nil ||
-		e.Encode(rf.log) != nil {
+		e.Encode(rf.log) != nil || 
+		e.Encode(rf.lastIncludedIndex) != nil || 
+		e.Encode(rf.lastIncludedTerm) != nil {
 		DPrintf("Write persist error")
 	} else {
 		raftstate := w.Bytes()
@@ -145,16 +148,20 @@ func (rf *Raft) readPersist(data []byte) {
 	// Example:
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	var currentTerm, votedFor int
+	var currentTerm, votedFor, lastIncludedIndex, lastIncludedTerm int
 	var log []LogEntry
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+		d.Decode(&log) != nil || 
+		d.Decode(&lastIncludedIndex) != nil || 
+		d.Decode(&lastIncludedTerm) != nil {
 		DPrintf("Read persist error")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
 	}
 }
 
@@ -164,6 +171,26 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	msg := ApplyMsg {}
+	msg.CommandValid = false
+	msg.SnapshotValid = true
+	msg.SnapshotIndex = index
+	msg.Snapshot = snapshot
+	rf.mu.Lock()
+	msg.SnapshotTerm = rf.currentTerm
+	// trim the log
+	
+	rf.mu.Unlock()
+	
+	rf.applyCh <- msg
+}
+
+func (rf *Raft) trimLog(index int) {
+	newCopy := make([]LogEntry, len(rf.log) - index - 1)
+	copy(newCopy, rf.log[index + 1 : ])
+	rf.log = newCopy
+
+
 
 }
 
@@ -212,7 +239,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		DPrintf("%d grant vote to %d", rf.me, args.CandidateId)
 		// grant vote to candidate
-		signalCh(rf.grantVote)
+		signalCh(rf.grantVote, true)
 	} else { // candidate's log is outdated
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
@@ -263,7 +290,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if reply.VoteGranted {
 		rf.voteCnt++
 		if rf.voteCnt == (len(rf.peers)/2 + 1) {
-			signalCh(rf.winElection)
+			signalCh(rf.winElection, true)
 		}
 	}
 	return true
@@ -329,7 +356,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	signalCh(rf.heartbeat) // if args.Term >= rf.currentTerm
+	signalCh(rf.heartbeat, true) // if args.Term >= rf.currentTerm
 
 	// if args.Term == rf.currentTerm, we should not set votedFor = -1
 	// since every term, every server should only vote for one candidate
@@ -337,7 +364,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.currentState != follower {
 		rf.currentState = follower
 		rf.persist()
-		signalCh(rf.convertToF)
+		signalCh(rf.convertToF, true)
 	}
 
 	if args.Term > rf.currentTerm {
@@ -382,7 +409,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log))
 		// apply log
-		signalCh(rf.applyEntries)
+		signalCh(rf.applyTrigger, true)
 	}
 }
 
@@ -439,7 +466,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		DPrintf("%d update %d match %d and next %d", rf.me, server, rf.matchIndex[server], rf.nextIndex[server])
 		if rf.tryCommit(server) && rf.commitIndex > rf.lastApplied {
 			// apply log
-			signalCh(rf.applyEntries)
+			signalCh(rf.applyTrigger, true)
 		}
 	} // heartbeat
 	return true
@@ -480,19 +507,34 @@ func (rf *Raft) startLogSync() {
 ** InstallSnapshot RPC **
 *************************/
 type InstallSnapshotArgs struct {
-
+	Term int // leader’s term
+	LeaderId int // so follower can redirect clients
+	LastIncludedIndex int // the snapshot replaces all entries up through and including this index
+	LastIncludedTerm int // term of lastIncludedIndex
+	Data []byte // raw bytes of the snapshot chunk
 }
 
 type InstallSnapshotReply struct {
-
+	Term int // currentTerm, for leader to update itself
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	if args.Term < rf.currentTerm { // refuse lower term request
+		reply.Term = rf.currentTerm
+		return
+	}
 }
 
-func (rf *Raft) sendInstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+
+	if !ok {
+		return false
+	}
+	return true
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -555,32 +597,40 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) applier(applyCh chan<- ApplyMsg) {
 	defer func() {
-		close(rf.applyEntries)
-		for i := 0; i < len(rf.applyEntries); i++ {
-			<-rf.applyEntries
+		close(rf.applyTrigger)
+		for i := 0; i < len(rf.applyTrigger); i++ {
+			<-rf.applyTrigger
 		}
 	}()
 
 	for !rf.killed() {
 
-		<-rf.applyEntries
+		isCommand := <-rf.applyTrigger
 
-		rf.mu.Lock()
+		if isCommand { // apply log entries
+			rf.mu.Lock()
 
-		for rf.commitIndex > rf.lastApplied {
-			rf.lastApplied++
-			msg := ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log[rf.lastApplied].Command,
-				CommandIndex: rf.lastApplied,
+			for rf.commitIndex > rf.lastApplied {
+				rf.lastApplied++
+				msg := ApplyMsg {
+					CommandValid: true,
+					Command:      rf.log[rf.lastApplied].Command,
+					CommandIndex: rf.lastApplied,
+				}
+
+				rf.mu.Unlock()
+				applyCh <- msg
+				rf.mu.Lock()
 			}
 			rf.mu.Unlock()
-
+		} else { // apply snapshot
+			msg := ApplyMsg {
+				CommandValid: false,
+				SnapshotValid: true,
+			}
 			applyCh <- msg
-
-			rf.mu.Lock()
 		}
-		rf.mu.Unlock()
+		
 	}
 }
 
@@ -639,7 +689,7 @@ func (rf *Raft) ticker() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan<- ApplyMsg) *Raft {
+	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -655,8 +705,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.grantVote = make(chan bool)
 	rf.winElection = make(chan bool)
 	rf.convertToF = make(chan bool)
-	rf.applyEntries = make(chan bool)
-
+	rf.applyTrigger = make(chan bool)
+	rf.applyCh = applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
@@ -727,7 +777,7 @@ func (rf *Raft) convertToCandidate() {
 func (rf *Raft) convertToFollower() {
 	if rf.currentState != follower {
 		rf.currentState = follower
-		signalCh(rf.convertToF)
+		signalCh(rf.convertToF, true)
 	}
 	rf.votedFor = -1
 }
@@ -744,9 +794,9 @@ func (rf *Raft) convertToLeader() {
 }
 
 // safe tranfer signal without blocking
-func signalCh(ch chan bool) {
+func signalCh(ch chan bool, sig bool) {
 	select {
-	case ch <- true:
+	case ch <- sig:
 	default:
 	}
 }

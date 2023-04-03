@@ -215,13 +215,29 @@ Start agreement: index 51
 
 ```
 
-While dealing uncommitted logs, it only takes no more than 1s and takes care of them together, however, while dealing commited logs, it takes 10s for 50 agreements, and finishes them one by one. I guess mainly because ApplyCh is hungry than other goroutine, and my program need to fullfil it first.
+It mainly because the test forces raft to complete the every agreement one by one, and my implementation only send appendEntries every 100ms. Here is the case that my raft have to wait 100ms to send next appendEntries, so the time for completing an agreement = 100ms + overhead.
 
+Solution(I guess): trigger the appendEntries immediately after start an agreement, and set a larger timeout for periodically appendEntries.
+
+However, in production, the timeout for regular appendEntries should be shorter than 100ms, and range from 0.5ms to 20ms depending on storage technology. Whether should raft trigger the appendEntries immediately is a trade-off here.
 
 # Lab 2C
 
 ## Task:
 
+**persist and readPersist**
+
+This lab is easy and mainly counts on the correctness of implementation of 2A and 2B.
+
+# Lab 2D
+
+## Task:
+
+start point: 
+
+A good place to start is to modify your code to so that it is able to store just the part of the log starting at some index X. Initially you can set X to zero and run the 2B/2C tests.
+
+Then make Snapshot(index) discard the log before index, and set X equal to index. If all goes well you should now pass the first 2D test.
 
 ## References:
 
