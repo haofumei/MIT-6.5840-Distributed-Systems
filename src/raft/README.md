@@ -225,7 +225,7 @@ However, in production, the timeout for regular appendEntries should be shorter 
 
 ## Task:
 
-**persist and readPersist**
+**persist() and readPersist()**
 
 This lab is easy and mainly counts on the correctness of implementation of 2A and 2B.
 
@@ -233,11 +233,25 @@ This lab is easy and mainly counts on the correctness of implementation of 2A an
 
 ## Task:
 
-start point: 
+Implement Snapshot() and the InstallSnapshot RPC
 
-A good place to start is to modify your code to so that it is able to store just the part of the log starting at some index X. Initially you can set X to zero and run the 2B/2C tests.
+## Details:
 
-Then make Snapshot(index) discard the log before index, and set X equal to index. If all goes well you should now pass the first 2D test.
+**Implement Snapshot() first to pass the first test**
+
+A good place to start is to assume the log starting at lastIncludedIndex. Initially set it to -1 and modify the code to pass 2B/2C tests. Then make Snapshot(index) discard the log before index, and set lastIncludedInde equal to index. But something need to be take care here is that the test call Snapshot(index) in:
+
+```go
+for m := range applyCh {
+	...
+	Snapshot(index)
+}
+```
+
+Which means that we can not send thing to applyCh directly in Snapshot(index), or it will be blocked.
+
+Furthermore, we must guarantee applying the snapshot before applying the command at (index + 1) to pass the test. You might observe that when calling Snapshot(index), the command at (index + 1) has been sent to applyCh before you can send snapshot (in my implememtation). 
+
 
 ## References:
 
