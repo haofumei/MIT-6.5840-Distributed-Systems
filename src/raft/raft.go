@@ -242,7 +242,6 @@ func (rf *Raft) trimLog(index int) {
 	}
 
 	rf.lastIncludedIndex = index // update at last
-	DPrintf("%d log after trim: %v and term: %d", rf.me, rf.log, rf.lastIncludedTerm)
 }
 
 // example RequestVote RPC arguments structure.
@@ -440,7 +439,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if len(args.Entries) > 0 { // append entries into log if not heartbeat
 				rf.log = append(rf.log[: rf.getCut(args.PrevLogIndex+1)], args.Entries...)
 				rf.persist(nil)
-				DPrintf("%d reply %v and %d, log: %v", rf.me, reply.Success, reply.Term, rf.log)
+				DPrintf("%d update its log: %v", rf.me, rf.log)
 			}
 			
 			if args.LeaderCommit > rf.commitIndex {
@@ -487,9 +486,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			if reply.XLen >= rf.lastIncludedIndex { // no need to send snapshot
 				rf.nextIndex[server] = reply.XLen
 			} else { // trigger send snapshot
-				if reply.XTerm != -1 {
-					needSnapshot = true
-				}
+				needSnapshot = true
 			}
 		} else {
 			pivot := rightBound(rf.log, reply.XTerm)
@@ -503,24 +500,36 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			
 		}
 	} else { // reply success
-		if len(args.Entries) > 0 { // append entries
-			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-			rf.nextIndex[server] = rf.matchIndex[server] + 1
+		if len(args.Entries) > 0 { // for debug
 			DPrintf("%d update %d match %d and next %d", rf.me, server, rf.matchIndex[server], rf.nextIndex[server])
 		} 
+
+		rf.matchIndex[server] = max(args.PrevLogIndex + len(args.Entries), rf.matchIndex[server])
+		rf.nextIndex[server] = max(args.PrevLogIndex + len(args.Entries) + 1, rf.nextIndex[server])
+
 		if rf.tryCommit(server) {
 			// apply log
 			signalCh(rf.applyTrigger, true)
 		}
-		
-		if reply.XLen < rf.lastIncludedIndex {
+		/*
+		// Suppose leader 0 log at index 98, and follower 1 log at index 98
+		// Leader now start a new agreement at log 99, and then sendAppendEntries to 1 with 99, and snapshot at 99
+		// Follower 1 successfully update its log to 99, and snapshot at 99 too
+		// Image at this time, 1's response to 0 lost due to network failure, which means leader can not update the nextIndex for 1
+		// 0 still send 98 as prevLogIndex to 1, and 1 will reply success for this prevLogIndex
+		// So I return full length of 1 for 0 to update the prevLogIndex
+		if reply.XLen > rf.nextIndex[server] {
+			rf.nextIndex[server] = reply.XLen
+		}*/
+
+		if reply.XLen < rf.lastIncludedIndex + 1 { 
 			needSnapshot = true
 		}
 	}
 
 	if needSnapshot {
 		select {
-		case rf.orderSnapshot <- snapshotOrder{server: server, id: 1}:
+		case rf.orderSnapshot <- snapshotOrder{server: server, id: 0}:
 		default:
 		}
 	}
@@ -546,12 +555,11 @@ func (rf *Raft) startLogSync() {
 			if rf.getPrevLogIndex(i) == rf.getLastLogIndex() {
 				argsList[i].Entries = nil
 			} else if rf.getPrevLogIndex(i) < rf.lastIncludedIndex {
-				argsList[i].Entries = nil
-				/*
+				argsList[i].Entries = nil // the entries have been deleted by snapshot
 				select {
-				case rf.orderSnapshot <- snapshotOrder{server: i, id: 1}:
+				case rf.orderSnapshot <- snapshotOrder{server: i, id: 0}: 
 				default:
-				}*/
+				}
 			} else {
 				subEntries := rf.log[rf.getCut(rf.nextIndex[i]) :]
 				argsList[i].Entries = make([]LogEntry, len(subEntries))
@@ -588,17 +596,17 @@ type InstallSnapshotReply struct {
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	DPrintf("%d start snapshot at %d", rf.me, args.LastIncludedIndex)
 	rf.mu.Lock()
 
-	if args.Term < rf.currentTerm || args.LastIncludedIndex <= rf.lastIncludedIndex || rf.suspendApply { 
+	if args.Term < rf.currentTerm || args.LastIncludedIndex <= rf.lastIncludedIndex { 
 		reply.Term = rf.currentTerm
+		DPrintf("%d reject snapshot at index %d", rf.me, args.LastIncludedIndex)
 		rf.mu.Unlock()
 		return
 	}
 
-	
-	DPrintf("%d start snapshot at %d", rf.me, args.LastIncludedIndex)
-	rf.suspendApply = true // suspend applying command
+	rf.suspendApply = true // suspend apply command until snapshot completes
 
 	msg := ApplyMsg{
 		CommandValid: false,
@@ -614,7 +622,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.commitIndex = args.LastIncludedIndex
 	rf.lastApplied = args.LastIncludedIndex
 
-	DPrintf("%d finish snapshot at %d, commit: %d", rf.me, args.LastIncludedIndex, rf.commitIndex)
+	DPrintf("%d finish snapshot at %d term %d, commit: %d", rf.me, args.LastIncludedIndex, rf.lastIncludedTerm, rf.commitIndex)
 	rf.mu.Unlock()
 
 	rf.snapshotCh <- msg
@@ -622,12 +630,13 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply, orderId int) bool {
-	DPrintf("%d send InstallSnapshot to %d with index %d with id: %d", rf.me, server, args.LastIncludedIndex, orderId)
+	DPrintf("%d send InstallSnapshot to %d with index %d term %d with id: %d", rf.me, server, args.LastIncludedIndex, args.LastIncludedTerm, orderId)
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 
 	if !ok {
 		select { // retry and increase orderId
 		case rf.orderSnapshot <- snapshotOrder{server: server, id: orderId + 1}:
+			DPrintf("%d retry %d with index %d term %d with id: %d", rf.me, server, args.LastIncludedIndex, args.LastIncludedTerm, orderId + 1)
 		default:
 		}
 		return false
@@ -653,13 +662,13 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 }
 
 func (rf *Raft) startInstallSnapshot() {
-
+	var asgs *InstallSnapshotArgs
 	lastIncludedIndices := make([]int, len(rf.peers))
 	prevOrderId := make([]int, len(rf.peers))
 
 	for !rf.killed() {
 		order := <- rf.orderSnapshot
-		
+		DPrintf("%d receive order (%d, %d)", rf.me, order.server, order.id)
 		rf.mu.Lock()
 
 		if rf.currentState != leader {
@@ -669,12 +678,13 @@ func (rf *Raft) startInstallSnapshot() {
 
 		if lastIncludedIndices[order.server] < rf.lastIncludedIndex { // new snapshot 
 			lastIncludedIndices[order.server] = rf.lastIncludedIndex
+			prevOrderId[order.server] = 0 // reset id for this lastIncludedIndex
 		} else if prevOrderId[order.server] > order.id { // this id for this lastIncludedIndex has been sent
 			rf.mu.Unlock()
 			continue
 		}
 
-		asgs := InstallSnapshotArgs {
+		asgs = &InstallSnapshotArgs {
 			Term: rf.currentTerm,
 			LeaderId: rf.me,
 			LastIncludedIndex: rf.lastIncludedIndex,
@@ -683,7 +693,7 @@ func (rf *Raft) startInstallSnapshot() {
 		}
 		
 		prevOrderId[order.server]++
-		go rf.sendInstallSnapshot(order.server, &asgs, &InstallSnapshotReply{}, order.id)
+		go rf.sendInstallSnapshot(order.server, asgs, &InstallSnapshotReply{}, order.id)
 
 		rf.mu.Unlock()
 	}
@@ -779,7 +789,7 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		electionTimeout := 300 + (rand.Int63() % 300)
-		heartBeatTimeout := 100
+		heartBeatTimeout := 120
 
 		rf.mu.Lock()
 		switch rf.currentState {
@@ -838,7 +848,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.votedFor = -1
-	rf.lastIncludedIndex = -1
+	rf.lastIncludedIndex = -1 // initiate to -1 to complement before snapshot apply
 	rf.currentState = follower
 	rf.suspendApply = false
 	rf.log = append(rf.log, LogEntry{Term: 0})
@@ -855,8 +865,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	if rf.lastIncludedIndex != -1 { // set up index after snapshot apply
+		rf.commitIndex = rf.lastIncludedIndex 
+		rf.lastApplied = rf.lastIncludedIndex 
+	} 
 
-	DPrintf("Initiate %d with log: %v", rf.me, rf.log)
+	DPrintf("Initiate %d term %d with log: %v", rf.me, rf.currentTerm, rf.log)
 
 	go rf.applier(applyCh)
 	go rf.snapshotDealer(applyCh)
