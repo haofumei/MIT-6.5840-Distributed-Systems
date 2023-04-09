@@ -41,9 +41,9 @@ If you choose to use channel, there is one thing you need to take seriously care
 
 So there is a more proper way to send the value to channel, use select-case-default to filer the unreceivable values.
 
-Choose a suitable election timeout, for example, if you choose 150ms as heartbeat timeout, so
+Choose a suitable election timeout, for example, if you choose 100ms as heartbeat timeout, so
 
-election timeout = 250ms(base time >> 150ms) + rand time(large enough to avoid election at the same time)
+election timeout = 500ms(base time >> 100ms) + rand time(large enough to avoid election at the same time)
 
 While receiving RequestVote from candidate, remember to set voteFor = null if term > currentTerm before voting.
 
@@ -250,9 +250,91 @@ for m := range applyCh {
 
 Which means that we can not send thing to applyCh directly in Snapshot(index), or it will be blocked.
 
-Furthermore, we must guarantee applying the snapshot before applying the command at (index + 1) to pass the test. You might observe that when calling Snapshot(index), the command at (index + 1) has been sent to applyCh before you can send snapshot (in my implememtation). 
+Furthermore, we must guarantee after applying the snapshot, we should apply the command at (index + 1) either newly or again (idempotent transaction). You might observe that when calling Snapshot(index), the command at (index + 1) has been sent to applyCh before you can send snapshot (in my implememtation).
+
+**InstallSnapshot RPC**
+
+* Since sending a snapshot is expensive, it should apply some mechanics to track the snaphots that has been sent and avoid sending too much duplicated snapshot. I use the orderId here to track the id has been used to send for a particular lastIncludedIndex.
+* Since the network may be unreliable and the server may be crash or disconnect, it is necessary to send enough InstallSnapshot to help follower catch up as fast as possible.
+
+The key to solve this problem is when should raft send InstallSnapshot.
+
+The article did not give too much details about this, my idea mainly divide it into two situations, passive and negative RPC.
+
+passive RPC: call when leader discover prevLogIndex < its lastIncludedIndex
+
+negative RPC: call when leader receives the response of appendEntries and "need" to call
+
+The passive RPC should call only once, but it will retry until the follower receives it, and the negative RPC should call unlimited times (can set a maximum time) but it will not retry.
+
+# Test Result
+
+Environment: 
+
+13‑inch M2 MacBook Pro,  8GB unified memory,  256GB SSD storage.
+
+```
+Test (2A): initial election ...
+  ... Passed --   3.6  3   64   17494    0
+Test (2A): election after network failure ...
+  ... Passed --   5.1  3  118   23886    0
+Test (2A): multiple elections ...
+  ... Passed --   6.5  7  570  109884    0
+Test (2B): basic agreement ...
+  ... Passed --   1.2  3   16    4352    3
+Test (2B): RPC byte count ...
+  ... Passed --   2.7  3   48  113804   11
+Test (2B): test progressive failure of followers ...
+  ... Passed --   5.3  3  112   24184    3
+Test (2B): test failure of leaders ...
+  ... Passed --   5.5  3  186   39599    3
+Test (2B): agreement after follower reconnects ...
+  ... Passed --   6.4  3  118   30542    8
+Test (2B): no agreement if too many followers disconnect ...
+  ... Passed --   3.9  5  180   38744    3
+Test (2B): concurrent Start()s ...
+  ... Passed --   1.1  3   12    3260    6
+Test (2B): rejoin of partitioned leader ...
+  ... Passed --   4.8  3  146   33204    4
+Test (2B): leader backs up quickly over incorrect follower logs ...
+  ... Passed --  25.1  5 2040 1616040  102
+Test (2B): RPC counts aren't too high ...
+  ... Passed --   2.9  3   50   14142   12
+Test (2C): basic persistence ...
+  ... Passed --   5.2  3   98   23538    6
+Test (2C): more persistence ...
+  ... Passed --  18.3  5  980  208564   16
+Test (2C): partitioned leader and one follower crash, leader restarts ...
+  ... Passed --   2.4  3   40    9597    4
+Test (2C): Figure 8 ...
+  ... Passed --  35.7  5  944  188837   19
+Test (2C): unreliable agreement ...
+  ... Passed --   5.7  5  212   73045  246
+Test (2C): Figure 8 (unreliable) ...
+  ... Passed --  34.8  5 3212 6557660  743
+Test (2C): churn ...
+  ... Passed --  16.3  5  360  174773  174
+Test (2C): unreliable churn ...
+  ... Passed --  16.2  5  624  282915  242
+Test (2D): snapshots basic ...
+  ... Passed --   7.2  3  136   47142  209
+Test (2D): install snapshots (disconnect) ...
+  ... Passed --  49.3  3 1160  456647  330
+Test (2D): install snapshots (disconnect+unreliable) ...
+  ... Passed --  63.1  3 1458  528778  300
+Test (2D): install snapshots (crash) ...
+  ... Passed --  39.1  3  807  359078  293
+Test (2D): install snapshots (unreliable+crash) ...
+  ... Passed --  46.6  3  979  474338  336
+Test (2D): crash and restart all servers ...
+  ... Passed --  15.0  3  286   77226   58
+Test (2D): snapshot initialization after crash ...
+  ... Passed --   4.6  3   80   20558   14
+PASS
+ok  	6.5840/raft	433.660s
+```
 
 
-## References:
+# References:
 
 1. Diego Ongaro and John Ousterhout (2014). "In Search of an Understandable Consensus Algorithm (Extended Version)." Technical Report No. 183, Stanford University. Available online: [https://raft.github.io/raft.pdf](https://raft.github.io/raft.pdf).

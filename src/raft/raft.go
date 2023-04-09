@@ -32,6 +32,10 @@ const (
 	follower  = 0
 	leader    = 1
 	candidate = 2
+	// millisecond
+	electionTimeBase = 500
+	electionTimeRange = 200
+	heartBeatTime = 100 
 )
 
 // as each Raft peer becomes aware that successive log entries are
@@ -317,8 +321,8 @@ func (rf *Raft) snapshotDealer(applyCh chan ApplyMsg) {
 func (rf *Raft) ticker() {
 	for !rf.killed() {
 
-		electionTimeout := 300 + (rand.Int63() % 300)
-		heartBeatTimeout := 100
+		electionTimeout := electionTimeBase + (rand.Int63() % electionTimeRange)
+		heartBeatTimeout := heartBeatTime
 
 		rf.mu.Lock()
 		switch rf.currentState {
@@ -414,7 +418,7 @@ func (rf *Raft) trimLog(index int) {
 	if index <= rf.getLastLogIndex() {
 		rf.lastIncludedTerm = rf.getTermAt(index)
 	}
-
+	
 	if rf.getLastLogIndex() <= index {
 		rf.log = make([]LogEntry, 0)
 	} else {
