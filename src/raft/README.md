@@ -217,7 +217,34 @@ Start agreement: index 51
 
 It mainly because the test forces raft to complete the every agreement one by one, and my implementation only send appendEntries every 100ms. Here is the case that my raft have to wait 100ms to send next appendEntries, so the time for completing an agreement = 100ms + overhead.
 
-Solution(I guess): trigger the appendEntries immediately after start an agreement, and set a larger timeout for periodically appendEntries.
+Solution: trigger the appendEntries immediately after start an agreement, and set a larger timeout for periodically appendEntries.
+
+Test result for the implementation of starting an agreement immediately, we can see the performance for this test was improved significantly.
+
+```
+Test (2B): basic agreement ...
+  ... Passed --   0.9  3   16    4320    3
+Test (2B): RPC byte count ...
+  ... Passed --   1.8  3   48  113804   11
+Test (2B): test progressive failure of followers ...
+  ... Passed --   4.9  3  110   24009    3
+Test (2B): test failure of leaders ...
+  ... Passed --   5.4  3  188   39841    3
+Test (2B): agreement after follower reconnects ...
+  ... Passed --   5.8  3  114   29891    8
+Test (2B): no agreement if too many followers disconnect ...
+  ... Passed --   3.8  5  180   38720    3
+Test (2B): concurrent Start()s ...
+  ... Passed --   1.2  3   18    4976    6
+Test (2B): rejoin of partitioned leader ...
+  ... Passed --   6.4  3  182   43531    4
+Test (2B): leader backs up quickly over incorrect follower logs ...
+  ... Passed --  17.2  5 1712 1206191  102
+Test (2B): RPC counts aren't too high ...
+  ... Passed --   2.6  3   48   13958   12
+PASS
+ok  	6.5840/raft	50.188s
+```
 
 However, in production, the timeout for regular appendEntries should be shorter than 100ms, and range from 0.5ms to 20ms depending on storage technology. Whether should raft trigger the appendEntries immediately is a trade-off here.
 
@@ -267,73 +294,78 @@ negative RPC: call when leader receives the response of appendEntries and "need"
 
 The passive RPC should call only once, but it will retry until the follower receives it, and the negative RPC should call unlimited times (can set a maximum time) but it will not retry.
 
+# Some optimations
+
+1. Trigger appendEntries immediately can help performance for all the test.
+2. Set a larger election timeout >= 500ms can help 2D test(disconnect and unreliable).
+3. Retry InstallSnapshot immediately if fails can help 2D test(crash and unreliable).
+
 # Test Result
 
-Environment: 
+Environment:
 
 13‑inch M2 MacBook Pro,  8GB unified memory,  256GB SSD storage.
 
 ```
 Test (2A): initial election ...
-  ... Passed --   3.6  3   64   17494    0
+  ... Passed --   3.5  3   62   16940    0
 Test (2A): election after network failure ...
-  ... Passed --   5.1  3  118   23886    0
+  ... Passed --   4.5  3  108   21088    0
 Test (2A): multiple elections ...
-  ... Passed --   6.5  7  570  109884    0
+  ... Passed --   6.6  7  552  109872    0
 Test (2B): basic agreement ...
-  ... Passed --   1.2  3   16    4352    3
+  ... Passed --   0.9  3   16    4352    3
 Test (2B): RPC byte count ...
-  ... Passed --   2.7  3   48  113804   11
+  ... Passed --   1.7  3   48  113804   11
 Test (2B): test progressive failure of followers ...
-  ... Passed --   5.3  3  112   24184    3
+  ... Passed --   4.9  3  112   24033    3
 Test (2B): test failure of leaders ...
-  ... Passed --   5.5  3  186   39599    3
+  ... Passed --   5.3  3  184   39155    3
 Test (2B): agreement after follower reconnects ...
-  ... Passed --   6.4  3  118   30542    8
+  ... Passed --   5.7  3  114   29899    8
 Test (2B): no agreement if too many followers disconnect ...
-  ... Passed --   3.9  5  180   38744    3
+  ... Passed --   3.7  5  180   38744    3
 Test (2B): concurrent Start()s ...
-  ... Passed --   1.1  3   12    3260    6
+  ... Passed --   1.1  3   18    5002    6
 Test (2B): rejoin of partitioned leader ...
-  ... Passed --   4.8  3  146   33204    4
+  ... Passed --   6.4  3  180   43004    4
 Test (2B): leader backs up quickly over incorrect follower logs ...
-  ... Passed --  25.1  5 2040 1616040  102
+  ... Passed --  15.1  5 1628 1176486  102
 Test (2B): RPC counts aren't too high ...
-  ... Passed --   2.9  3   50   14142   12
+  ... Passed --   2.6  3   48   13666   12
 Test (2C): basic persistence ...
-  ... Passed --   5.2  3   98   23538    6
+  ... Passed --   4.2  3   90   21630    6
 Test (2C): more persistence ...
-  ... Passed --  18.3  5  980  208564   16
+  ... Passed --  16.9  5  948  200914   16
 Test (2C): partitioned leader and one follower crash, leader restarts ...
-  ... Passed --   2.4  3   40    9597    4
+  ... Passed --   2.2  3   38    8967    4
 Test (2C): Figure 8 ...
-  ... Passed --  35.7  5  944  188837   19
+  ... Passed --  36.9  5 1068  226681   48
 Test (2C): unreliable agreement ...
-  ... Passed --   5.7  5  212   73045  246
+  ... Passed --   2.1  5  248   87611  246
 Test (2C): Figure 8 (unreliable) ...
-  ... Passed --  34.8  5 3212 6557660  743
+  ... Passed --  30.8  5 8648 13883181  128
 Test (2C): churn ...
-  ... Passed --  16.3  5  360  174773  174
+  ... Passed --  16.5  5 11168 33170534 3018
 Test (2C): unreliable churn ...
-  ... Passed --  16.2  5  624  282915  242
+  ... Passed --  16.1  5 3984 11594984  577
 Test (2D): snapshots basic ...
-  ... Passed --   7.2  3  136   47142  209
+  ... Passed --   4.3  3  150   52766  205
 Test (2D): install snapshots (disconnect) ...
-  ... Passed --  49.3  3 1160  456647  330
+  ... Passed --  45.2  3 1206  482630  323
 Test (2D): install snapshots (disconnect+unreliable) ...
-  ... Passed --  63.1  3 1458  528778  300
+  ... Passed --  53.7  3 1411  576068  332
 Test (2D): install snapshots (crash) ...
-  ... Passed --  39.1  3  807  359078  293
+  ... Passed --  34.8  3  906  444649  324
 Test (2D): install snapshots (unreliable+crash) ...
-  ... Passed --  46.6  3  979  474338  336
+  ... Passed --  46.1  3 1017  407946  299
 Test (2D): crash and restart all servers ...
-  ... Passed --  15.0  3  286   77226   58
+  ... Passed --   9.8  3  296   81155   60
 Test (2D): snapshot initialization after crash ...
-  ... Passed --   4.6  3   80   20558   14
+  ... Passed --   3.3  3   81   21003   14
 PASS
-ok  	6.5840/raft	433.660s
+ok  	6.5840/raft	385.433s
 ```
-
 
 # References:
 
