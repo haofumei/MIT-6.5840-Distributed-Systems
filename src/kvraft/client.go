@@ -90,7 +90,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			ck.leaderId = i
 			break
 		}
-		i++
+		i++ 
 	}
 	ck.SN++
 }

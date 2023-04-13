@@ -4,7 +4,6 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
-	ErrInvalidOp   = "ErrInvalidOp"
 	ResponseTimeout = 500
 )
 
