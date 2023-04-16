@@ -25,6 +25,7 @@ type Op struct {
 	Type string // "Get", "Put" or "Append"
 	Key string // "Key" for the "Value"
 	Value string // empty for "Get"
+	Err Err
 	ClientId int64 // who assigns this Op
 	SN int // serial number for this Op
 }
@@ -32,7 +33,7 @@ type Op struct {
 type dupEntry struct { // record the executed request
 	SN int 
 	Value string
-	Err string
+	Err Err
 }
 
 type KVServer struct {
@@ -44,7 +45,7 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 	data map[string]string
-	replyCh map[int]chan interface{}
+	opCh map[int]chan Op
 	dupTable map[int64]dupEntry
 }
 
@@ -58,48 +59,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		SN: args.SN,
 	}
 	DPrintf("%d call op: %v", kv.me, op)
-	kv.mu.Lock()
+	
+	newOp := kv.doit(&op)
 
-	// the follower should have the ability to detect duplicate before redirect to leader.
-	// if it is a up-to-date follower, it is safe to do so.
-	// if it is a stale follower, it is still safe to do so, because:
-	// 1. if it has this entry, implies its log has been updated to this request
-	// 2. if it does not, it will be redirect to other up-to-date server.
-	// if it is a stale leader, this request will timeout and redirect to other serser.
-	if dEntry, ok := kv.dupTable[args.ClientId]; ok { // duplicate detection
-		if dEntry.SN == args.SN {
-			reply.Value = dEntry.Value
-			reply.Err = OK
-			kv.mu.Unlock()
-			return
-		} 
+	if newOp.ClientId == op.ClientId && newOp.SN == op.SN {
+		reply.Value = newOp.Value
+		reply.Err = newOp.Err
 	}
-
-	index, _, isLeader := kv.rf.Start(op)
-
-	if !isLeader { // check if it is leader
-		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
-		return
-	} 
-
-	// must create reply channel before unlock
-	ch := make(chan interface{})
-	kv.replyCh[index] = ch
-	kv.mu.Unlock()
-
-	select {
-	case result := <-ch:
-		*reply = result.(GetReply)
-	case <-time.After(time.Duration(ResponseTimeout) * time.Millisecond):
-		reply.Err = ErrWrongLeader // if we don't get a reponse in time, leader may be dead
-	}	
-
-	kv.mu.Lock()
-	delete(kv.replyCh, index)
-	kv.mu.Unlock()
-	DPrintf("%d reply op: %v,index:%d reply: %v", kv.me, op, index, reply)
-
+	
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -112,6 +79,15 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		SN: args.SN,
 	}
 	DPrintf("%d call op: %v", kv.me, op)
+
+	newOp := kv.doit(&op)
+
+	if newOp.ClientId == op.ClientId && newOp.SN == op.SN {
+		reply.Err = newOp.Err
+	}
+}
+
+func (kv *KVServer) doit(op *Op) Op {
 	kv.mu.Lock()
 
 	// the follower should have the ability to detect duplicate before redirect to leader.
@@ -120,37 +96,45 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// 1. if it has this entry, implies its log has been updated to this request
 	// 2. if it does not, it will be redirect to other up-to-date server.
 	// if it is a stale leader, this request will timeout and redirect to other serser.
-	if dEntry, ok := kv.dupTable[args.ClientId]; ok { // duplicate detection
-		if dEntry.SN == args.SN {
-			reply.Err = OK
+	if dEntry, ok := kv.dupTable[op.ClientId]; ok { // duplicate detection
+		if dEntry.SN == op.SN {
+			op.Value = dEntry.Value
+			op.Err = OK
 			kv.mu.Unlock()
-			return
+			return *op
 		} 
 	}
-	
-	index, _, isLeader := kv.rf.Start(op)
-	
-	if !isLeader { // check if it is leader
-		reply.Err = ErrWrongLeader
+
+	index, term, isLeader := kv.rf.Start(*op)
+
+	if term == 0 {
+		op.Err = ErrInitElection
 		kv.mu.Unlock()
-		return
+		return *op
+	}
+
+	if !isLeader { // check if it is leader
+		op.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return *op
 	} 
 
-	ch := make(chan interface{})
-	kv.replyCh[index] = ch
+	// must create reply channel before unlock
+	ch := make(chan Op)
+	kv.opCh[index] = ch
 	kv.mu.Unlock()
 
 	select {
 	case result := <-ch:
-		*reply = result.(PutAppendReply)
+		return result
 	case <-time.After(time.Duration(ResponseTimeout) * time.Millisecond):
-		reply.Err = ErrWrongLeader // if we don't get a reponse in time, leader may be dead
+		op.Err = ErrWrongLeader // if we don't get a reponse in time, leader may be dead
 	}	
 
 	kv.mu.Lock()
-	delete(kv.replyCh, index)
+	delete(kv.opCh, index)
 	kv.mu.Unlock()
-	DPrintf("%d reply op: %v,index:%d reply: %v", kv.me, op, index, reply)
+	return *op
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -196,7 +180,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.data = make(map[string]string)
-	kv.replyCh = make(map[int]chan interface{})
+	kv.opCh = make(map[int]chan Op)
 	kv.dupTable = make(map[int64]dupEntry)
 
 	go kv.applier()
@@ -243,10 +227,10 @@ func (kv *KVServer) ingestCommand(index int, command interface{}) {
 				Err: OK,
 			}
 
-			if ch, ok := kv.replyCh[index]; ok { // if it is leader
-				if _, isLeader := kv.rf.GetState(); isLeader {
-					ch <- GetReply{Value: value, Err: OK}
-				}
+			if ch, ok := kv.opCh[index]; ok { 
+				op.Value = value
+				op.Err = OK
+				ch <- op
 			}
 		} else {
 			kv.dupTable[op.ClientId] = dupEntry{
@@ -254,10 +238,9 @@ func (kv *KVServer) ingestCommand(index int, command interface{}) {
 				Err: ErrNoKey,
 			}
 
-			if ch, ok := kv.replyCh[index]; ok { // if it is leader
-				if _, isLeader := kv.rf.GetState(); isLeader {
-					ch <- GetReply{Err: ErrNoKey}
-				}
+			if ch, ok := kv.opCh[index]; ok { // if it is leader
+				op.Err = ErrNoKey
+				ch <- op
 			} 
 		}
 	case "Put":
@@ -267,10 +250,9 @@ func (kv *KVServer) ingestCommand(index int, command interface{}) {
 			Err: OK,
 		}
 		
-		if ch, ok := kv.replyCh[index]; ok { // if it is leader
-			if _, isLeader := kv.rf.GetState(); isLeader {
-				ch <- PutAppendReply{Err: OK}
-			}
+		if ch, ok := kv.opCh[index]; ok { // if it is leader
+			op.Err = OK
+			ch <- op
 		}
 	case "Append":
 		kv.data[op.Key] += op.Value
@@ -279,10 +261,9 @@ func (kv *KVServer) ingestCommand(index int, command interface{}) {
 			Err: OK,
 		}
 	
-		if ch, ok := kv.replyCh[index]; ok { // if it is leader
-			if _, isLeader := kv.rf.GetState(); isLeader {
-				ch <- PutAppendReply{Err: OK}
-			}
+		if ch, ok := kv.opCh[index]; ok { // if it is leader
+			op.Err = OK
+			ch <- op
 		}
 	default:
 	}

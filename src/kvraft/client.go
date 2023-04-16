@@ -3,6 +3,7 @@ package kvraft
 import (
 	"crypto/rand"
 	"math/big"
+	"time"
 
 	"6.5840/labrpc"
 )
@@ -51,17 +52,28 @@ func (ck *Clerk) Get(key string) string {
 
 	n := len(ck.servers)
 	i := ck.leaderId
+	ck.SN++
+
 	for {
 		ok := ck.servers[i%n].Call("KVServer.Get", &args, &reply)
-		if ok && reply.Err != ErrWrongLeader {
-			ck.leaderId = i
-			break
+		if !ok || reply.Err == ErrWrongLeader { // timeout or wrong leader
+			i++
+			continue
 		}
-		i++
+
+		if reply.Err == ErrInitElection {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+
+		ck.leaderId = i
+		if reply.Err == OK {
+			return reply.Value
+		}
+		if reply.Err == ErrNoKey {
+			return ""
+		}
 	}
-	
-	ck.SN++
-	return reply.Value
 }
 
 // shared by Put and Append.
@@ -84,15 +96,24 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	n := len(ck.servers)
 	i := ck.leaderId
+	ck.SN++
 	for {
 		ok := ck.servers[i%n].Call("KVServer.PutAppend", &args, &reply)
-		if ok && reply.Err != ErrWrongLeader {
-			ck.leaderId = i
-			break
+		if !ok || reply.Err == ErrWrongLeader { // timeout or wrong leader
+			i++
+			continue
 		}
-		i++ 
+
+		if reply.Err == ErrInitElection {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+
+		ck.leaderId = i
+		if reply.Err == OK {
+			return 
+		}
 	}
-	ck.SN++
 }
 
 func (ck *Clerk) Put(key string, value string) {
