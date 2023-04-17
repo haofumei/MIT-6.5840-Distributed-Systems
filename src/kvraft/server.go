@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,10 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+// maxraftstate(1000) equals approximated 16 logs,
+// so I choose 10 here for avoding confilts.
+const snapCheckpoint = 10
+
 
 type Op struct {
 	Type string // "Get", "Put" or "Append"
@@ -30,7 +35,7 @@ type Op struct {
 	SN int // serial number for this Op
 }
 
-type dupEntry struct { // record the executed request
+type DupEntry struct { // record the executed request
 	SN int 
 	Value string
 	Err Err
@@ -43,10 +48,13 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
 
-	maxraftstate int // snapshot if log grows this big
-	data map[string]string
+	// Persistent state on snapshot, capitalize for encoding
+	Data map[string]string
+	DupTable map[int64]DupEntry
+
+	// Volatile state on all server.
 	opCh map[int]chan Op
-	dupTable map[int64]dupEntry
+	lastApplied int 
 }
 
 
@@ -58,10 +66,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		ClientId: args.ClientId,
 		SN: args.SN,
 	}
-	DPrintf("%d call op: %v", kv.me, op)
 	
 	newOp := kv.doit(&op)
 
+	// Optimation: reply if it is a same op even though the leader may change
 	if newOp.ClientId == op.ClientId && newOp.SN == op.SN {
 		reply.Value = newOp.Value
 		reply.Err = newOp.Err
@@ -78,10 +86,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		ClientId: args.ClientId,
 		SN: args.SN,
 	}
-	DPrintf("%d call op: %v", kv.me, op)
 
 	newOp := kv.doit(&op)
 
+	// Optimation: reply if it is a same op even though the leader may change
 	if newOp.ClientId == op.ClientId && newOp.SN == op.SN {
 		reply.Err = newOp.Err
 	}
@@ -96,7 +104,7 @@ func (kv *KVServer) doit(op *Op) Op {
 	// 1. if it has this entry, implies its log has been updated to this request
 	// 2. if it does not, it will be redirect to other up-to-date server.
 	// if it is a stale leader, this request will timeout and redirect to other serser.
-	if dEntry, ok := kv.dupTable[op.ClientId]; ok { // duplicate detection
+	if dEntry, ok := kv.DupTable[op.ClientId]; ok { // duplicate detection
 		if dEntry.SN == op.SN {
 			op.Value = dEntry.Value
 			op.Err = OK
@@ -119,6 +127,8 @@ func (kv *KVServer) doit(op *Op) Op {
 		return *op
 	} 
 
+	DPrintf("%d call op: %v at index %d", kv.me, op, index)
+
 	// must create reply channel before unlock
 	ch := make(chan Op)
 	kv.opCh[index] = ch
@@ -126,7 +136,7 @@ func (kv *KVServer) doit(op *Op) Op {
 
 	select {
 	case result := <-ch:
-		return result
+		return result // new op result from applier
 	case <-time.After(time.Duration(ResponseTimeout) * time.Millisecond):
 		op.Err = ErrWrongLeader // if we don't get a reponse in time, leader may be dead
 	}	
@@ -175,23 +185,23 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := new(KVServer)
 	kv.me = me
-	kv.maxraftstate = maxraftstate
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.data = make(map[string]string)
+	kv.Data = make(map[string]string)
 	kv.opCh = make(map[int]chan Op)
-	kv.dupTable = make(map[int64]dupEntry)
+	kv.DupTable = make(map[int64]DupEntry)
 
-	go kv.applier()
+	kv.ingestSnap(persister.ReadSnapshot())
+
+	go kv.applier(persister, maxraftstate)
 
 	return kv
 }
 
-func (kv *KVServer) applier() {
+func (kv *KVServer) applier(persister *raft.Persister, maxraftstate int) {
 
 	for m := range kv.applyCh {
-		DPrintf("%d apply command: %v", kv.me, m)
 
 		if (kv.killed()) {
 			DPrintf("kill applier")
@@ -199,9 +209,28 @@ func (kv *KVServer) applier() {
 		}
 
 		if m.CommandValid {
+			DPrintf("%d apply command: %v at %d", kv.me, m.Command, m.CommandIndex)
 			kv.ingestCommand(m.CommandIndex, m.Command)
-		}
 
+			if maxraftstate != -1 && (m.CommandIndex % snapCheckpoint == 0) { 
+				if persister.RaftStateSize() > maxraftstate {
+					kv.printPersist(persister.ReadRaftState())
+					w := new(bytes.Buffer)
+					e := labgob.NewEncoder(w)
+					kv.mu.Lock()
+					if e.Encode(kv.Data) != nil ||
+						e.Encode(kv.DupTable) != nil {
+						log.Fatalf("snapshot encode error")
+					}
+					kv.mu.Unlock()
+					DPrintf("%d snapshot at %d", kv.me, m.CommandIndex)
+					kv.rf.Snapshot(m.CommandIndex, w.Bytes())
+				}
+			}
+		} else if m.SnapshotValid && kv.lastApplied < m.SnapshotIndex { // no need lock here
+			DPrintf("%d apply snapshot at %d and lastApplied: %d", kv.me, m.SnapshotIndex, kv.lastApplied)
+			kv.ingestSnap(m.Snapshot)
+		}
 	}
 }
 
@@ -213,15 +242,17 @@ func (kv *KVServer) ingestCommand(index int, command interface{}) {
 
 	// if a duplicate request arrives before the original executes
 	// don't execute if table says already seen
-	if dEntry, ok := kv.dupTable[op.ClientId]; ok && dEntry.SN >= op.SN { 
+	if dEntry, ok := kv.DupTable[op.ClientId]; ok && dEntry.SN >= op.SN { 
 		return
 	}
 
+	kv.lastApplied = index // update lastApplied index
+
 	switch op.Type {
 	case "Get":
-		value, ok := kv.data[op.Key]
+		value, ok := kv.Data[op.Key]
 		if ok {
-			kv.dupTable[op.ClientId] = dupEntry{
+			kv.DupTable[op.ClientId] = DupEntry{
 				SN: op.SN,
 				Value: value,
 				Err: OK,
@@ -233,30 +264,30 @@ func (kv *KVServer) ingestCommand(index int, command interface{}) {
 				ch <- op
 			}
 		} else {
-			kv.dupTable[op.ClientId] = dupEntry{
+			kv.DupTable[op.ClientId] = DupEntry{
 				SN: op.SN,
 				Err: ErrNoKey,
 			}
 
-			if ch, ok := kv.opCh[index]; ok { // if it is leader
+			if ch, ok := kv.opCh[index]; ok { 
 				op.Err = ErrNoKey
 				ch <- op
 			} 
 		}
 	case "Put":
-		kv.data[op.Key] = op.Value
-		kv.dupTable[op.ClientId] = dupEntry{
+		kv.Data[op.Key] = op.Value
+		kv.DupTable[op.ClientId] = DupEntry{
 			SN: op.SN,
 			Err: OK,
 		}
 		
-		if ch, ok := kv.opCh[index]; ok { // if it is leader
+		if ch, ok := kv.opCh[index]; ok { 
 			op.Err = OK
 			ch <- op
 		}
 	case "Append":
-		kv.data[op.Key] += op.Value
-		kv.dupTable[op.ClientId] = dupEntry{
+		kv.Data[op.Key] += op.Value
+		kv.DupTable[op.ClientId] = DupEntry{
 			SN: op.SN,
 			Err: OK,
 		}
@@ -267,6 +298,44 @@ func (kv *KVServer) ingestCommand(index int, command interface{}) {
 		}
 	default:
 	}
-	DPrintf("%d current dupTable: %v", kv.me, kv.dupTable)
 }
 
+func (kv *KVServer) ingestSnap(snapshot []byte) {
+	if len(snapshot) == 0 {
+		return // ignore empty snapshot
+	}
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	var data map[string]string
+	var dupTable map[int64]DupEntry
+	if d.Decode(&data) != nil ||
+		d.Decode(&dupTable) != nil {
+		log.Fatalf("snapshot decode error")
+	}
+
+	kv.mu.Lock()
+	kv.Data = data
+	kv.DupTable = dupTable
+	kv.mu.Unlock()
+}
+
+func (kv *KVServer) printPersist(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	// Your code here (2C).
+	// Example:
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm, votedFor, lastIncludedIndex, lastIncludedTerm int
+	var log []raft.LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil ||
+		d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedTerm) != nil {
+		DPrintf("Read persist error")
+	} else {
+		DPrintf("%d currentTerm: %d, vote: %d, log: %v, lastInclude: %d", kv.me, currentTerm, votedFor, log, lastIncludedIndex)
+	}
+}
