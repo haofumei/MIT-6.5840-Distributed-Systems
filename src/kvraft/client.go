@@ -55,14 +55,14 @@ func (ck *Clerk) Get(key string) string {
 	ck.SN++
 
 	for {
-		ok := ck.servers[i%n].Call("KVServer.Get", &args, &reply)
+		ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
 		if !ok || reply.Err == ErrWrongLeader { // timeout or wrong leader
-			i++
+			i = (i + 1) % n
 			continue
 		}
 
 		if reply.Err == ErrInitElection {
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
@@ -98,14 +98,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	i := ck.leaderId
 	ck.SN++
 	for {
-		ok := ck.servers[i%n].Call("KVServer.PutAppend", &args, &reply)
+		ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
 		if !ok || reply.Err == ErrWrongLeader { // timeout or wrong leader
-			i++
+			i = (i + 1) % n
 			continue
 		}
 
 		if reply.Err == ErrInitElection {
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 

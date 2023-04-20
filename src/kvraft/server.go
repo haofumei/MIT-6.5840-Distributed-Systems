@@ -21,16 +21,11 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-// maxraftstate(1000) equals approximated 16 logs,
-// so I choose 10 here for avoding confilts.
-const snapCheckpoint = 10
-
-
 type Op struct {
 	Type string // "Get", "Put" or "Append"
 	Key string // "Key" for the "Value"
 	Value string // empty for "Get"
-	Err Err
+	Err Err // err message
 	ClientId int64 // who assigns this Op
 	SN int // serial number for this Op
 }
@@ -49,15 +44,15 @@ type KVServer struct {
 	dead    int32 // set by Kill()
 
 	// Persistent state on snapshot, capitalize for encoding
-	Data map[string]string
-	DupTable map[int64]DupEntry
+	Data map[string]string // key/value pairs
+	DupTable map[int64]DupEntry // table for duplicated check
 
 	// Volatile state on all server.
-	opCh map[int]chan Op
-	lastApplied int 
+	opCh map[int]chan Op // transfer result to RPC
+	lastApplied int // lastApplied log index
 }
 
-
+// Get RPC fetches the current value for the key, or empty string for a non-existent key.
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	op := Op {
@@ -77,6 +72,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	
 }
 
+// Put replaces the value for a particular key in the database, Append appends arg to key's value
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	
 	op := Op {
@@ -95,6 +91,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
+// handle one Op received by Get or PutAppend RPC.
+// first, it performs duplicated detection. if not, it goes to next step.
+// if current server is the leader, it will replicate the log through Raft, and update the key/value pairs based on the Op.
+// finally, it returns response info in Op for next same Op check.
 func (kv *KVServer) doit(op *Op) Op {
 	kv.mu.Lock()
 
@@ -104,7 +104,7 @@ func (kv *KVServer) doit(op *Op) Op {
 	// 1. if it has this entry, implies its log has been updated to this request
 	// 2. if it does not, it will be redirect to other up-to-date server.
 	// if it is a stale leader, this request will timeout and redirect to other serser.
-	if dEntry, ok := kv.DupTable[op.ClientId]; ok { // duplicate detection
+	if dEntry, ok := kv.DupTable[op.ClientId]; ok { // duplicated detection
 		if dEntry.SN == op.SN {
 			op.Value = dEntry.Value
 			op.Err = OK
@@ -199,20 +199,19 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	return kv
 }
 
+// this function acts at a long running goroutine,
+// accepts ApplyMsg from Raft through applyCh.
+// if it is a command, it will update the state of storage, and check the necessity to take a snapshot.
+// if it is a snapshot, it will install the snapshot.
 func (kv *KVServer) applier(persister *raft.Persister, maxraftstate int) {
 
 	for m := range kv.applyCh {
-
-		if (kv.killed()) {
-			DPrintf("kill applier")
-			return
-		}
 
 		if m.CommandValid {
 			DPrintf("%d apply command: %v at %d", kv.me, m.Command, m.CommandIndex)
 			kv.ingestCommand(m.CommandIndex, m.Command)
 
-			if maxraftstate != -1 && (m.CommandIndex % snapCheckpoint == 0) { 
+			if maxraftstate != -1 && (m.CommandIndex % SnapCheckpoint == 0) { 
 				if persister.RaftStateSize() > maxraftstate {
 					kv.printPersist(persister.ReadRaftState())
 					w := new(bytes.Buffer)
@@ -234,6 +233,8 @@ func (kv *KVServer) applier(persister *raft.Persister, maxraftstate int) {
 	}
 }
 
+// ingest one command, and update the state of storage.
+// transfer back the result by OpCh.
 func (kv *KVServer) ingestCommand(index int, command interface{}) {
 	op := command.(Op)
 
@@ -300,6 +301,7 @@ func (kv *KVServer) ingestCommand(index int, command interface{}) {
 	}
 }
 
+// install the snapshot.
 func (kv *KVServer) ingestSnap(snapshot []byte) {
 	if len(snapshot) == 0 {
 		return // ignore empty snapshot
@@ -319,12 +321,12 @@ func (kv *KVServer) ingestSnap(snapshot []byte) {
 	kv.mu.Unlock()
 }
 
+// debug print
 func (kv *KVServer) printPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if data == nil || len(data) < 1 { 
 		return
 	}
-	// Your code here (2C).
-	// Example:
+
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var currentTerm, votedFor, lastIncludedIndex, lastIncludedTerm int
