@@ -185,21 +185,24 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	rf.mu.Lock()
+	if index <= rf.lastIncludedIndex {
+		rf.mu.Unlock()
+		return 
+	}
+	
 	rf.suspendApply = true // suspend applying command
 	rf.trimLog(index)      // trim the log
 	rf.persist(snapshot)   // persist state and snapshot
 	select {               // use select to avoid blocking
-	case <-rf.applyCh: // if the last command has sent to applyCh
-		rf.lastApplied-- // rollback lastApplied to resend
+	case <-rf.applyCh: // unblock applyCh
 	default:
 	}
+	rf.lastApplied = rf.lastIncludedIndex // rollback lastApplied to resend
 	rf.mu.Unlock()
 
 	rf.applyTrigger <- false // apply snapshot trigger
 
 	// can not send msg to applyCh here, or it will block
-	DPrintf("%d snapshot at index %d", rf.me, index)
-
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -215,11 +218,12 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	index := -1
+	term := rf.currentTerm
 
 	if rf.currentState != leader || rf.killed() {
 		return index, term, false
@@ -823,8 +827,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.suspendApply = true             // suspend apply command until snapshot completes
 	rf.trimLog(args.LastIncludedIndex) // trim the log
+	rf.lastIncludedTerm = args.LastIncludedTerm
 	rf.persist(args.Data)              // persist state and snapshot
-	rf.lastIncludedTerm = args.LastIncludedTerm 
 	rf.commitIndex = args.LastIncludedIndex
 	rf.lastApplied = args.LastIncludedIndex
 
