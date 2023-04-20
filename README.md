@@ -5,3 +5,5 @@
 ## [Lab 1: MapReduce](https://github.com/haofumei/MIT-6.5840-Distributed-Systems/tree/master/src/mr/)
 
 ## [Lab 2: Raft](https://github.com/haofumei/MIT-6.5840-Distributed-Systems/tree/master/src/raft)
+
+## [Lab 3: Fault-tolerant Key/Value Service](https://github.com/haofumei/MIT-6.5840-Distributed-Systems/tree/master/src/kvraft)
