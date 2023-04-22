@@ -30,44 +30,52 @@ type Config struct {
 
 const (
 	OK = "OK"
+	ErrWrongLeader = "ErrWrongLeader"
+	ResponseTimeout = 1000
 )
 
 type Err string
 
 type JoinArgs struct {
+	ClientId int64 
+	SN int 
 	Servers map[int][]string // new GID -> servers mappings
 }
 
 type JoinReply struct {
-	WrongLeader bool
 	Err         Err
 }
 
 type LeaveArgs struct {
+	ClientId int64 
+	SN int
 	GIDs []int
 }
 
 type LeaveReply struct {
-	WrongLeader bool
 	Err         Err
 }
 
 type MoveArgs struct {
+	ClientId int64 
+	SN int
 	Shard int
 	GID   int
 }
 
 type MoveReply struct {
-	WrongLeader bool
 	Err         Err
 }
 
 type QueryArgs struct {
+	ClientId int64 
+	SN int
 	Num int // desired config number
 }
 
 type QueryReply struct {
-	WrongLeader bool
 	Err         Err
 	Config      Config
 }
+
+
