@@ -4,7 +4,6 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
-	ErrInitElection = "ErrInitElection"
 	ResponseTimeout = 1000
 	// maxraftstate(1000) equals approximated 16 logs,
 	// so I choose 10 here for avoding confilts.

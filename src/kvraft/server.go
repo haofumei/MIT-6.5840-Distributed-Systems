@@ -25,7 +25,6 @@ type Op struct {
 	Type string // "Get", "Put" or "Append"
 	Key string // "Key" for the "Value"
 	Value string // empty for "Get"
-	Err Err // err message
 	ClientId int64 // who assigns this Op
 	SN int // serial number for this Op
 }
@@ -34,6 +33,13 @@ type DupEntry struct { // record the executed request
 	SN int 
 	Value string
 	Err Err
+}
+
+type doitResult struct {
+	ClientId int64 // who assigns this Op
+	SN int // serial number for this Op
+	Value string // empty for "Get"
+	Err Err // err message
 }
 
 type KVServer struct {
@@ -48,7 +54,7 @@ type KVServer struct {
 	DupTable map[int64]DupEntry // table for duplicated check
 
 	// Volatile state on all server.
-	opCh map[int]chan Op // transfer result to RPC
+	resultCh map[int]chan doitResult // transfer result to RPC
 	lastApplied int // lastApplied log index
 }
 
@@ -62,12 +68,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		SN: args.SN,
 	}
 	
-	newOp := kv.doit(&op)
+	result := kv.doit(&op)
 
 	// Optimation: reply if it is a same op even though the leader may change
-	if newOp.ClientId == op.ClientId && newOp.SN == op.SN {
-		reply.Value = newOp.Value
-		reply.Err = newOp.Err
+	if result.ClientId == args.ClientId && result.SN == args.SN {
+		reply.Value = result.Value
+		reply.Err = result.Err
 	}
 	
 }
@@ -83,11 +89,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		SN: args.SN,
 	}
 
-	newOp := kv.doit(&op)
+	result := kv.doit(&op)
 
 	// Optimation: reply if it is a same op even though the leader may change
-	if newOp.ClientId == op.ClientId && newOp.SN == op.SN {
-		reply.Err = newOp.Err
+	if result.ClientId == args.ClientId && result.SN == args.SN {
+		reply.Err = result.Err
 	}
 }
 
@@ -95,7 +101,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 // first, it performs duplicated detection. if not, it goes to next step.
 // if current server is the leader, it will replicate the log through Raft, and update the key/value pairs based on the Op.
 // finally, it returns response info in Op for next same Op check.
-func (kv *KVServer) doit(op *Op) Op {
+func (kv *KVServer) doit(op *Op) doitResult {
+	result := doitResult{ClientId: op.ClientId, SN: op.SN}
 	kv.mu.Lock()
 
 	// the follower should have the ability to detect duplicate before redirect to leader.
@@ -106,45 +113,39 @@ func (kv *KVServer) doit(op *Op) Op {
 	// if it is a stale leader, this request will timeout and redirect to other serser.
 	if dEntry, ok := kv.DupTable[op.ClientId]; ok { // duplicated detection
 		if dEntry.SN == op.SN {
-			op.Value = dEntry.Value
-			op.Err = OK
+			result.Value = dEntry.Value
+			result.Err = OK
 			kv.mu.Unlock()
-			return *op
+			return result
 		} 
 	}
 
-	index, term, isLeader := kv.rf.Start(*op)
-
-	if term == 0 {
-		op.Err = ErrInitElection
-		kv.mu.Unlock()
-		return *op
-	}
+	index, _, isLeader := kv.rf.Start(*op)
 
 	if !isLeader { // check if it is leader
-		op.Err = ErrWrongLeader
+		result.Err = ErrWrongLeader
 		kv.mu.Unlock()
-		return *op
+		return result
 	} 
 
 	DPrintf("%d call op: %v at index %d", kv.me, op, index)
 
 	// must create reply channel before unlock
-	ch := make(chan Op)
-	kv.opCh[index] = ch
+	ch := make(chan doitResult)
+	kv.resultCh[index] = ch
 	kv.mu.Unlock()
 
 	select {
-	case result := <-ch:
-		return result // new op result from applier
+	case result = <-ch:
 	case <-time.After(time.Duration(ResponseTimeout) * time.Millisecond):
-		op.Err = ErrWrongLeader // if we don't get a reponse in time, leader may be dead
+		result.Err = ErrWrongLeader // if we don't get a reponse in time, leader may be dead
 	}	
 
-	kv.mu.Lock()
-	delete(kv.opCh, index)
-	kv.mu.Unlock()
-	return *op
+	go func() { // unblock applier
+		<-ch
+	}()
+
+	return result
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -189,7 +190,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.Data = make(map[string]string)
-	kv.opCh = make(map[int]chan Op)
+	kv.resultCh = make(map[int]chan doitResult)
 	kv.DupTable = make(map[int64]DupEntry)
 
 	kv.ingestSnap(persister.ReadSnapshot())
@@ -237,68 +238,56 @@ func (kv *KVServer) applier(persister *raft.Persister, maxraftstate int) {
 // transfer back the result by OpCh.
 func (kv *KVServer) ingestCommand(index int, command interface{}) {
 	op := command.(Op)
+	result := doitResult{ClientId: op.ClientId, SN: op.SN}
 
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
+	kv.lastApplied = index // update lastApplied index
+
 	// if a duplicate request arrives before the original executes
 	// don't execute if table says already seen
 	if dEntry, ok := kv.DupTable[op.ClientId]; ok && dEntry.SN >= op.SN { 
-		return
+		// it is safe to ignore the lower SN request,
+		// since the sender has received the result for this SN, 
+		// and has sent the higher SN for another request.
+		if dEntry.SN == op.SN { 
+			result.Err = dEntry.Err
+			result.Value = dEntry.Value
+		}
+	} else {
+		switch op.Type {
+		case "Get":
+			value, ok := kv.Data[op.Key]
+			if ok {
+				result.Value = value
+				result.Err = OK			
+			} else {
+				result.Err = ErrNoKey 
+			}
+		case "Put":
+			kv.Data[op.Key] = op.Value
+			result.Err = OK
+		case "Append":
+			kv.Data[op.Key] += op.Value
+			result.Err = OK
+		default:
+			panic(op)
+		}
+
+		kv.DupTable[result.ClientId] = DupEntry{
+			SN: result.SN,
+			Value: result.Value,
+			Err: result.Err,
+		}
 	}
-
-	kv.lastApplied = index // update lastApplied index
-
-	switch op.Type {
-	case "Get":
-		value, ok := kv.Data[op.Key]
-		if ok {
-			kv.DupTable[op.ClientId] = DupEntry{
-				SN: op.SN,
-				Value: value,
-				Err: OK,
-			}
-
-			if ch, ok := kv.opCh[index]; ok { 
-				op.Value = value
-				op.Err = OK
-				ch <- op
-			}
-		} else {
-			kv.DupTable[op.ClientId] = DupEntry{
-				SN: op.SN,
-				Err: ErrNoKey,
-			}
-
-			if ch, ok := kv.opCh[index]; ok { 
-				op.Err = ErrNoKey
-				ch <- op
-			} 
-		}
-	case "Put":
-		kv.Data[op.Key] = op.Value
-		kv.DupTable[op.ClientId] = DupEntry{
-			SN: op.SN,
-			Err: OK,
-		}
-		
-		if ch, ok := kv.opCh[index]; ok { 
-			op.Err = OK
-			ch <- op
-		}
-	case "Append":
-		kv.Data[op.Key] += op.Value
-		kv.DupTable[op.ClientId] = DupEntry{
-			SN: op.SN,
-			Err: OK,
-		}
 	
-		if ch, ok := kv.opCh[index]; ok { // if it is leader
-			op.Err = OK
-			ch <- op
-		}
-	default:
+	// send the result back if this server has channel 
+	// no matter whether it is a duplicated or new request to avoid resource leaks
+	if ch, ok := kv.resultCh[index]; ok { 
+		ch <- result
 	}
+	delete(kv.resultCh, index)
 }
 
 // install the snapshot.

@@ -58,11 +58,9 @@ func (ck *Clerk) Get(key string) string {
 		ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
 		if !ok || reply.Err == ErrWrongLeader { // timeout or wrong leader
 			i = (i + 1) % n
-			continue
-		}
-
-		if reply.Err == ErrInitElection {
-			time.Sleep(100 * time.Millisecond)
+			if i == ck.leaderId { // can't find leader, take a rest
+				time.Sleep(100 * time.Millisecond)
+			}
 			continue
 		}
 
@@ -101,11 +99,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
 		if !ok || reply.Err == ErrWrongLeader { // timeout or wrong leader
 			i = (i + 1) % n
-			continue
-		}
-
-		if reply.Err == ErrInitElection {
-			time.Sleep(100 * time.Millisecond)
+			if i == ck.leaderId { // can't find leader, take a rest
+				time.Sleep(100 * time.Millisecond)
+			}
 			continue
 		}
 
