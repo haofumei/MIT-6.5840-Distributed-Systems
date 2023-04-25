@@ -14,9 +14,21 @@ const (
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrShardPreparing = "ErrShardPreparing"
+	ResponseTimeout = 1000
+	// maxraftstate(1000) equals approximated 16 logs,
+	// so I choose 10 here for avoding confilts.
+	SnapCheckpoint = 10
+
+	PollInterval = 100 // poll the shardctrler to learn about new configurations.
+	ShardOK = "ShardOK"
+	ShardEmpty = "ShardEmpty"
+	ShardMigratable = "ShardMigratable"
+	ShardHandoff = "ShardHandoff" // indicate server stop accepting request for this shard
 )
 
 type Err string
+type ShardStatus string
 
 // Put or Append
 type PutAppendArgs struct {
@@ -24,9 +36,9 @@ type PutAppendArgs struct {
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	ClientId int64
+	SN int
+	Shard int
 }
 
 type PutAppendReply struct {
@@ -35,10 +47,22 @@ type PutAppendReply struct {
 
 type GetArgs struct {
 	Key string
-	// You'll have to add definitions here.
+	ClientId int64
+	SN int
+	Shard int
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+type ShardMigrationArgs struct {
+	Num int
+	Sid int
+}
+
+type ShardMigrationReply struct {
+	Data map[string]string
+	Err Err
 }
