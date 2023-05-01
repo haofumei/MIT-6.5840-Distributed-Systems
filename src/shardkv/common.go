@@ -23,8 +23,8 @@ const (
 
 	PollInterval = 100 // poll the shardctrler to learn about new configurations.
 	ShardOK = "ShardOK"
-	ShardMigrating = "ShardMigrating"
-	ShardHandoff = "ShardHandoff" // indicate server stop accepting request for this shard
+	ShardMigrationOut = "ShardMigrationOut"
+	ShardMigrationIn = "ShardMigrationIn"
 )
 
 type Err string
