@@ -38,7 +38,7 @@ type PutAppendArgs struct {
 	Op    string // "Put" or "Append"
 	ClientId int64
 	SN int
-	Shard int
+	SID int
 }
 
 type PutAppendReply struct {
@@ -49,7 +49,7 @@ type GetArgs struct {
 	Key string
 	ClientId int64
 	SN int
-	Shard int
+	SID int
 }
 
 type GetReply struct {
@@ -59,12 +59,14 @@ type GetReply struct {
 
 type ShardMigrationArgs struct {
 	Num int
-	Sids []int
-	Data []map[string]string
 	ClientId int64
 	SN int
+	SID int
+	Data map[string]string
+	DupTable map[int64]DupEntry
 }
 
 type ShardMigrationReply struct {
+	Num int
 	Err Err
 }
