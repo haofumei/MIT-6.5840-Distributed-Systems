@@ -5,9 +5,8 @@ const (
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
 	ResponseTimeout = 1000
-	// maxraftstate(1000) equals approximated 16 logs,
-	// so I choose 10 here for avoding confilts.
-	SnapCheckpoint = 10
+	SnapshotTimeout = 100
+	MaxNumOfCommandsWithoutSnapshot = 20 
 )
 
 type Err string
