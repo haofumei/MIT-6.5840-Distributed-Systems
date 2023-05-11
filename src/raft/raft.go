@@ -140,7 +140,7 @@ func (rf *Raft) persist(snapshot []byte) {
 		e.Encode(rf.log) != nil ||
 		e.Encode(rf.lastIncludedIndex) != nil ||
 		e.Encode(rf.lastIncludedTerm) != nil {
-		DPrintf("Write persist error")
+		panic("Write persist error")
 	} else {
 		raftstate := w.Bytes()
 		if snapshot != nil {
@@ -168,7 +168,7 @@ func (rf *Raft) readPersist(data []byte) {
 		d.Decode(&log) != nil ||
 		d.Decode(&lastIncludedIndex) != nil ||
 		d.Decode(&lastIncludedTerm) != nil {
-		DPrintf("Read persist error")
+		panic("Read persist error")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
@@ -239,7 +239,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = rf.getLastLogIndex()
 	rf.matchIndex[rf.me] = index
 	rf.nextIndex[rf.me] = index + 1
-	DPrintf("%d Start agreement: index %d, log: %v", rf.me, index, rf.log[len(rf.log)-1])
 	signalCh(rf.startAgreement, true)
 	return index, term, true
 }
@@ -300,9 +299,9 @@ func (rf *Raft) applier(applyCh chan<- ApplyMsg) {
 				Command:      rf.log[rf.getCut(rf.lastApplied)].Command,
 				CommandIndex: rf.lastApplied,
 			}
-
+			DPrintf("%d try to apply %v", rf.me, msg)
 			rf.mu.Unlock()
-
+			
 			applyCh <- msg
 
 			rf.mu.Lock() // lock again after send msg to channel
@@ -411,7 +410,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.lastApplied = rf.lastIncludedIndex
 	}
 
-	DPrintf("Initiate %d term %d with log: %v", rf.me, rf.currentTerm, rf.log)
+	DPrintf("Initiate %d term %d comIndex: %d, lastApplied: %d with log: %v", rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.log)
 
 	go rf.applier(applyCh)
 
@@ -471,6 +470,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm { // a better candidate occurs
 		rf.currentTerm = args.Term
 		rf.convertToFollower()
+		rf.persist(nil)
 	}
 
 	// if votedFor is null or candidateId, and candidate’s log is at
@@ -510,9 +510,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	DPrintf("%d send requestVote to %d, args: %v", rf.me, server, args)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	DPrintf("%d reply requestVote to %d, reply: %v", server, rf.me, reply)
 
 	if !ok {
 		return false
@@ -558,7 +556,6 @@ func (rf *Raft) startElection() {
 	rf.voteCnt = 1
 	rf.persist(nil)
 
-	DPrintf("%d start election(term: %d)", rf.me, rf.currentTerm)
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
@@ -612,17 +609,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// if args.Term == rf.currentTerm, we should not set votedFor = -1
 	// since every term, every server should only vote for one candidate
 	// and here this candidate has voted itself
-	if rf.currentState != follower {
-		rf.currentState = follower
-		rf.persist(nil)
-		signalCh(rf.convertToF, true)
-	}
-
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.convertToFollower()
-		rf.persist(nil)
-	}
+	rf.currentTerm = args.Term
+	rf.convertToFollower()
+	rf.persist(nil)
 
 	reply.XLen = rf.getUncut(len(rf.log)) // always return full length to update snapshot
 
@@ -648,7 +637,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			needPersist := false
 			begin := rf.getCut(args.PrevLogIndex) + 1
 			existingEntries := rf.log[begin:]
-			DPrintf("%d log: %v and append: %v", rf.me, rf.log, args.Entries)
 			for i = 0; i < min(len(existingEntries), len(args.Entries)); i++ {
 				if existingEntries[i].Term != args.Entries[i].Term {
 					rf.log = rf.log[:begin+i]
@@ -660,7 +648,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.log = append(rf.log, args.Entries[i:]...)
 				needPersist = true
 			}
-			DPrintf("%d log: %v after append", rf.me, rf.log)
 			
 			if needPersist {
 				rf.persist(nil)
@@ -680,9 +667,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // Send one AppendEntries request to the server.
 // Update leader info based on the response.
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	DPrintf("%d sendAppendEntries to %d, args: %v", rf.me, server, args)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	DPrintf("%d replyAppendEntries to %d, reply: %v", server, rf.me, reply)
 
 	if !ok {
 		return false
@@ -721,15 +706,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			}
 		}
 	} else { // reply success
-		if len(args.Entries) > 0 { // for debug
-			DPrintf("%d update %d match %d and next %d", rf.me, server, rf.matchIndex[server], rf.nextIndex[server])
-		}
-
 		rf.matchIndex[server] = max(args.PrevLogIndex+len(args.Entries), rf.matchIndex[server])
 		rf.nextIndex[server] = max(args.PrevLogIndex+len(args.Entries)+1, rf.nextIndex[server])
 
-		if rf.tryCommit(server) {
+		if rf.tryCommit() {
 			// apply log
+			DPrintf("%d update commitIndex: %d", rf.me, rf.commitIndex)
 			signalCh(rf.applyTrigger, true)
 		}
 
@@ -841,16 +823,13 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 // if fail to receive the response, retry a same call; 
 // otherwise, update the nextIndex and matchIndex for this server.
 func (rf *Raft) sendInstallSnapshot(order snapshotOrder, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
-	DPrintf("%d send InstallSnapshot to %d with index %d term %d with id: %d", rf.me, order.server, args.LastIncludedIndex, args.LastIncludedTerm, order.id)
 	ok := rf.peers[order.server].Call("Raft.InstallSnapshot", args, reply)
-	DPrintf("%d reply InstallSnapshot to %d with index %d term %d with id: %d", order.server, rf.me, args.LastIncludedIndex, args.LastIncludedTerm, order.id)
 	
 	if !ok {
 		if order.retry {
 			order.id = order.id + 1 // retry and increase orderId
 			select {
 			case rf.orderSnapshot <- order:
-				DPrintf("%d retry %d with index %d term %d with id: %d", rf.me, order.server, args.LastIncludedIndex, args.LastIncludedTerm, order.id)
 			default:
 			}
 		}
@@ -1035,7 +1014,7 @@ func (rf *Raft) convertToLeader() {
 		rf.nextIndex[i] = rf.getLastLogIndex() + 1
 		rf.matchIndex[i] = 0
 	}
-	DPrintf("%d becomes leader (term: %d)", rf.me, rf.currentTerm)
+	DPrintf("%d becomes leader (term: %d, commitIndex: %d, lastApplied: %d)", rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied)
 }
 
 // safe tranfer signal without blocking
@@ -1048,25 +1027,22 @@ func signalCh(ch chan bool, sig bool) {
 
 // If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,
 // and log[N].term == currentTerm: set commitIndex = N
-func (rf *Raft) tryCommit(server int) bool {
-	N := rf.matchIndex[server]
-	cnt := 0
-
-	if N <= rf.commitIndex {
-		return false
-	}
-
-	for i := range rf.peers {
-		if rf.matchIndex[i] >= N {
-			cnt++
+func (rf *Raft) tryCommit() bool {
+	oldCommitIndex := rf.commitIndex
+	for N := oldCommitIndex+1; N < rf.getUncut(len(rf.log)); N++ {
+		if rf.getTermAt(N) == rf.currentTerm {
+			cnt := 0
+			for i := range rf.peers {
+				if rf.matchIndex[i] >= N {
+					cnt++
+				}
+			}
+			if cnt > (len(rf.peers)/2) {
+				rf.commitIndex = N
+			}
 		}
 	}
-
-	if cnt > (len(rf.peers)/2) && rf.log[rf.getCut(N)].Term == rf.currentTerm {
-		rf.commitIndex = N
-		return true
-	}
-	return false
+	return oldCommitIndex != rf.commitIndex
 }
 
 // Return index of the leftmost element in the array that is greater than or equal to x;
