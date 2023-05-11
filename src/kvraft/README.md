@@ -8,8 +8,10 @@
 
 ## Block point:
 
-1. if you try to just compare the maxraftstate with persister.RaftStateSize(), and trigger the snapshot, it may cause a problem. Image when server is accepting commands from applyCh, Raft is also starting new agreements at the same time. Assuming index 20 at Raft'log is a threshold to trigger the snapshot, server 1 and 2 may choose to snapshot at index 19 or 20, because of the delays of accepting commands from applyCh. Thus, setting a checkpoint(how many logs can we trigger a snapshot) and calculating the ratio of maxraftstate and persister.RaftStateSize() should be a better option.
+1. When should you snapshot?
+   We can't take snapshot just to compare the state size with the max allowing size after every command, since Raft's last log index may be greatly larger than the service applied index, which will cause it to take snapshot every command. How about taking snapshot after a period of time? It will work, but the state size may be beyond the test size within some periods of time. Therefore, I think the best way to snapshot is after a period of time or after a number of applied commands.
 2. What should be persisted?
+   The most important thing is the data and duplicated table, besides we also need to persist the lastIncludedIndex. Image when the server crashes, if we don't persist the lastIncludedIndex, and the next command is an outdated snapshot when the server restarts, the server may applied this snapshot since the lastIncludedIndex is 0 now.
 
 ## Test result:
 
@@ -72,4 +74,3 @@ ok  	6.5840/kvraft	401.111s
 ## Later work:
 
 1. In my implementation, the leader sends snapshot to the follower when follower's log is just one index behind and the follower is going to take a snapshot. So it is better to allow the follower's log lag a few logs behind the leader.
-2. The number of RPC need to be optimized.
