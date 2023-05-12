@@ -19,9 +19,11 @@ const (
 	ResponseTimeout = 1000
 	// maxraftstate(1000) equals approximated 16 logs,
 	// so I choose 10 here for avoding confilts.
-	SnapCheckpoint = 10
+	SnapshotTimeout = 100
+	SnapCheckpoint = 20
 
 	PollInterval = 100 // poll the shardctrler to learn about new configurations.
+	MigrationInterval = 100 // poll the shardctrler to learn about new configurations.
 	ShardOK = "ShardOK"
 	ShardMigrationOut = "ShardMigrationOut"
 	ShardMigrationIn = "ShardMigrationIn"
@@ -58,12 +60,11 @@ type GetReply struct {
 }
 
 type ShardMigrationArgs struct {
+	GID int64
 	Num int
-	ClientId int64
-	SN int
-	SID int
-	Data map[string]string
-	DupTable map[int64]DupEntry
+	SIDs []int
+	Data []map[string]string
+	DupTables []map[int64]DupEntry
 }
 
 type ShardMigrationReply struct {
