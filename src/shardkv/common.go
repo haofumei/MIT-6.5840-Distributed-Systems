@@ -63,8 +63,7 @@ type ShardMigrationArgs struct {
 	GID int64
 	Num int
 	SIDs []int
-	Data []map[string]string
-	DupTables []map[int64]DupEntry
+	Shards map[int]*Shard
 }
 
 type ShardMigrationReply struct {
