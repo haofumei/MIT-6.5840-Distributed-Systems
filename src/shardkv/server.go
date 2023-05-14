@@ -21,11 +21,11 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-type Op struct {
+type Op struct { // op pass to Raft as command
 	Playload interface{}
 }
 
-type ClientOp struct {
+type ClientOp struct { // client request's playload
 	Type     string // "Get", "Put" or "Append"
 	Key      string // "Key" for the "Value"
 	Value    string // empty for "Get"
@@ -34,36 +34,35 @@ type ClientOp struct {
 	SID      int    // shard id responsible for this Op
 }
 
-type MigrationOut struct {
-	Num  int
-	GID  int64
-	SIDs []int
-}
-
-type MigrationIn struct {
-	Num    int
-	GID    int64
+type MigrationIn struct { // migrationIn's playload, indicates migration begin
+	Num    int            // config num for this migration
+	GID    int64          // who provides this migration
 	Shards map[int]*Shard // shard data replicated by leader
 }
 
-type DupEntry struct { // record the executed request
-	SN    int
-	Value string
-	Err   Err
+type MigrationOut struct { // migrationOut's playload, indicates migration end
+	Num  int   // config num for this migration
+	SIDs []int // shards that have finished migration
 }
 
-type opResult struct {
-	ClientId int64  // who assigns this result
-	SN       int    // serial number for this result
-	SID      int    // shard id responsible for this result
+type DupEntry struct { // record the executed client request
+	SN    int    // serial number
+	Value string // empty for "Get"
+	Err   Err    // err message
+}
+
+type opResult struct { // op executed result
+	ClientId int64  // who assigns this op
+	SN       int    // serial number for this op
+	SID      int    // shard id responsible for this op
 	Value    string // empty for "Get"
 	Err      Err    // err message
 }
 
-type Shard struct {
-	Status   ShardStatus
-	Data     map[string]string
-	DupTable map[int64]DupEntry
+type Shard struct { // single shard data
+	Status   ShardStatus        // current shard status
+	Data     map[string]string  // Key/Value data
+	DupTable map[int64]DupEntry // duplicated table for this shard
 }
 
 type ShardKV struct {
@@ -86,12 +85,10 @@ type ShardKV struct {
 	// Volatile state on all server.
 	resultCh         map[int]chan opResult // transfer result to RPC
 	lastApplied      int                   // lastApplied log index
-	lastMigrationNum int
-
-	// Channels
-	pollTrigger      chan bool
-	migrationTrigger chan bool
-	snapshotTrigger  chan bool
+	lastMigrationNum int                   // last migration config number
+	pollTrigger      chan bool             // signal ch for fetching new config
+	migrationTrigger chan bool             // signal ch for starting migration
+	snapshotTrigger  chan bool             // signal ch for taking a snapshot
 }
 
 // the tester calls Kill() when a ShardKV instance won't
@@ -103,6 +100,7 @@ func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 }
 
+// test whether the service has been killed
 func (kv *ShardKV) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
@@ -146,11 +144,11 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv := new(ShardKV)
 	kv.me = me
-	kv.maxraftstate = maxraftstate
 	kv.make_end = make_end
 	kv.gid = gid
 	kv.ctrlers = ctrlers
 	kv.sm = shardctrler.MakeClerk(kv.ctrlers)
+	kv.maxraftstate = maxraftstate
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.pollTrigger = make(chan bool)
@@ -159,7 +157,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.resultCh = make(map[int]chan opResult)
-
 	kv.Shards = make(map[int]*Shard)
 
 	kv.ingestSnap(persister.ReadSnapshot())
@@ -174,10 +171,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	return kv
 }
 
-// handle one Op received by Get or PutAppend RPC.
+// handle one Op received by Get, PutAppend or ShardMigration RPC.
 // first, it performs duplicated detection. if not, it goes to next step.
 // if current server is the leader, it will replicate the log through Raft, and update the key/value pairs based on the Op.
-// finally, it returns response info in Op for next same Op check.
+// finally, it returns response info of Op for the same Op check.
 func (kv *ShardKV) doit(op *Op) opResult {
 	result := opResult{}
 
@@ -189,7 +186,6 @@ func (kv *ShardKV) doit(op *Op) opResult {
 		result.SID = pl.SID
 
 		// check if the replica group is responsible or ready for this client op
-
 		if kv.Config.Shards[pl.SID] != kv.gid || kv.Shards[pl.SID].Status != ShardOK {
 			result.Err = ErrWrongGroup
 			kv.mu.Unlock()
@@ -278,7 +274,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 // ingest one command, and update the state of storage.
-// transfer back the result by OpCh.
+// transfer back the result by opResult Channel.
 func (kv *ShardKV) ingestCommand(index int, command interface{}) {
 	op := command.(Op)
 	result := opResult{Err: OK}
@@ -311,6 +307,11 @@ func (kv *ShardKV) ingestCommand(index int, command interface{}) {
 		result.ClientId = pl.ClientId
 		result.SN = pl.SN
 		result.SID = pl.SID
+
+		if kv.Config.Shards[pl.SID] != kv.gid || kv.Shards[pl.SID].Status != ShardOK {
+			result.Err = ErrWrongGroup
+			return
+		}
 		// if a duplicate request arrives before the original executes
 		// don't execute if table says already seen
 		if dEntry, ok := kv.Shards[pl.SID].DupTable[pl.ClientId]; ok && dEntry.SN >= pl.SN {
@@ -321,28 +322,23 @@ func (kv *ShardKV) ingestCommand(index int, command interface{}) {
 				result.Err = dEntry.Err
 				result.Value = dEntry.Value
 			}
-		} else { // new request
-			if kv.Config.Shards[pl.SID] != kv.gid || kv.Shards[pl.SID].Status != ShardOK {
-				result.Err = ErrWrongGroup
-				DPrintf("(%d:%d) dangerous request: %v", kv.gid, kv.me, op)
-				return
-			}
+			return
+		}
 
-			switch pl.Type {
-			case "Get":
-				value, ok := kv.Shards[pl.SID].Data[pl.Key]
-				if ok {
-					result.Value = value
-				} else {
-					result.Err = ErrNoKey
-				}
-			case "Put":
-				kv.Shards[pl.SID].Data[pl.Key] = pl.Value
-			case "Append":
-				kv.Shards[pl.SID].Data[pl.Key] += pl.Value
-			default:
-				panic(op)
+		switch pl.Type {
+		case "Get":
+			value, ok := kv.Shards[pl.SID].Data[pl.Key]
+			if ok {
+				result.Value = value
+			} else {
+				result.Err = ErrNoKey
 			}
+		case "Put":
+			kv.Shards[pl.SID].Data[pl.Key] = pl.Value
+		case "Append":
+			kv.Shards[pl.SID].Data[pl.Key] += pl.Value
+		default:
+			panic(op)
 		}
 
 		kv.Shards[pl.SID].DupTable[result.ClientId] = DupEntry{
@@ -374,7 +370,7 @@ func (kv *ShardKV) ingestCommand(index int, command interface{}) {
 			signalCh(kv.pollTrigger, true)
 		}
 	case MigrationOut:
-		if pl.Num == kv.Config.Num { 
+		if pl.Num == kv.Config.Num {
 			for _, i := range pl.SIDs {
 				delete(kv.Shards, i)
 			}
@@ -387,8 +383,8 @@ func (kv *ShardKV) ingestCommand(index int, command interface{}) {
 	}
 }
 
-// prepare for migration by update Config and shard status, halt the shards that need migration,
-// return a map(gid->shards) that indicates the shards need to migrate out
+// apply the config received by applier.
+// if the config is applicable, set up the shards that need to migrate in or out.
 func (kv *ShardKV) applyConfig(newConfig shardctrler.Config) bool {
 	if newConfig.Num <= kv.Config.Num {
 		return false
@@ -471,16 +467,20 @@ func (kv *ShardKV) applier(applyCh chan raft.ApplyMsg) {
 	}
 }
 
+// this function acts at a long running goroutine,
+// take a snapshot periodically or triggered by signal.
 func (kv *ShardKV) snapshoter(persister *raft.Persister, maxraftstate int) {
 	if maxraftstate == -1 {
 		return
 	}
 
 	for !kv.killed() {
+
 		select {
 		case <-kv.snapshotTrigger:
 		case <-time.After(SnapshotTimeout * time.Millisecond):
 		}
+
 		if kv.killed() {
 			return
 		}
@@ -506,6 +506,9 @@ func (kv *ShardKV) snapshoter(persister *raft.Persister, maxraftstate int) {
 
 }
 
+// this function acts at a long running goroutine,
+// fetch the new config periodically or triggered by signal.
+// if it is a new config (larger config number), start a new agreement through Raft.
 func (kv *ShardKV) pollTicker(pollTrigger chan bool) {
 	for !kv.killed() {
 
@@ -536,6 +539,8 @@ func (kv *ShardKV) pollTicker(pollTrigger chan bool) {
 	}
 }
 
+// ShardMigration handler.
+// if the migration can be applied(same config number), accepts it.
 func (kv *ShardKV) ShardMigration(args *ShardMigrationArgs, reply *ShardMigrationReply) {
 
 	kv.mu.Lock()
@@ -570,6 +575,8 @@ func (kv *ShardKV) ShardMigration(args *ShardMigrationArgs, reply *ShardMigratio
 	}
 }
 
+// this function acts at a long running goroutine,
+// if accepts signal from migrationTrigger channel, start migration out for current config.
 func (kv *ShardKV) migrationer(migrationTrigger chan bool) {
 	for !kv.killed() {
 
@@ -588,12 +595,14 @@ func (kv *ShardKV) migrationer(migrationTrigger chan bool) {
 	}
 }
 
+// start migraion out for a config number,
+// it will keep migrating out every MigrationInterval until finished.
 func (kv *ShardKV) startMigrationOut(num int) {
 	defer func() {
-		DPrintf("(%d:%d) finish migration out for num: %d", kv.gid, kv.me, num)
+		DPrintf("(%d:%d) exit migration out for num: %d", kv.gid, kv.me, num)
 	}()
 
-	for {
+	for !kv.killed() {
 
 		if _, isLeader := kv.rf.GetState(); !isLeader {
 			return
@@ -607,7 +616,8 @@ func (kv *ShardKV) startMigrationOut(num int) {
 			kv.mu.Unlock()
 			return
 		}
-		
+
+		// divide the migration out shards into gids
 		shardsOut := make(map[int][]int) // gid -> sids
 		for _, sid := range out {
 			gid := kv.Config.Shards[sid]
@@ -627,24 +637,24 @@ func (kv *ShardKV) startMigrationOut(num int) {
 	}
 }
 
+// call the ShardMigration handler,
+// if the reply is OK or ErrOutdatedConfig, start the MigrationOut op,
+// indicates this migration out has finished.
 func (kv *ShardKV) sendShardMigration(servers []string, args *ShardMigrationArgs, reply *ShardMigrationReply) {
 
-	DPrintf("(%d:%d) send migration with args: %v", kv.gid, kv.me, args)
 	for si := 0; si < len(servers); si++ {
 		srv := kv.make_end(servers[si])
 		ok := srv.Call("ShardKV.ShardMigration", args, reply)
-		DPrintf("(%d:%d) get reply: %v from: %d args: %v", kv.gid, kv.me, reply, si, args)
 		if ok && (reply.Err == OK || reply.Err == ErrOutdatedConfig) {
 			kv.mu.Lock()
 			if kv.Config.Num == args.Num {
 				migrationOut := MigrationOut{
 					Num:  args.Num,
-					GID:  args.GID,
 					SIDs: args.SIDs,
 				}
 				kv.mu.Unlock()
 				kv.rf.Start(Op{Playload: migrationOut})
-				DPrintf("(%d:%d) migration out for num: %d and sids: %v done", kv.gid, kv.me, args.Num, args.SIDs)
+				DPrintf("(%d:%d) done migration out for sids: %v(num:%d) ", kv.gid, kv.me, args.SIDs, args.Num)
 				break
 			}
 			kv.mu.Unlock()
@@ -652,6 +662,8 @@ func (kv *ShardKV) sendShardMigration(servers []string, args *ShardMigrationArgs
 	}
 }
 
+// build shard migration args for a group of shards
+// thread-unsafe, need lock
 func (kv *ShardKV) buildShardMigrationArgs(sids []int) *ShardMigrationArgs {
 	args := ShardMigrationArgs{
 		GID:    int64(kv.gid),
@@ -666,6 +678,7 @@ func (kv *ShardKV) buildShardMigrationArgs(sids []int) *ShardMigrationArgs {
 	return &args
 }
 
+// transfer the signal without blocking
 func signalCh(ch chan bool, val bool) {
 	select {
 	case ch <- val:
@@ -673,6 +686,8 @@ func signalCh(ch chan bool, val bool) {
 	}
 }
 
+// return the copy of a single shard by pointer
+// thread-unsafe, need lock
 func copyOfShard(shard *Shard) *Shard {
 	result := Shard{
 		Status:   shard.Status,
@@ -689,6 +704,7 @@ func copyOfShard(shard *Shard) *Shard {
 }
 
 // check if all shards are OK
+// return the shards that need to migration in and out
 // thread-unsafe, need lock
 func (kv *ShardKV) checkAllShardsStatus() ([]int, []int) {
 	in, out := make([]int, 0), make([]int, 0)
