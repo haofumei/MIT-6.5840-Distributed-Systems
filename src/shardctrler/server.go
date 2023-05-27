@@ -205,7 +205,6 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 // turn off debug output from this instance.
 func (sc *ShardCtrler) Kill() {
 	sc.rf.Kill()
-	// Your code here, if desired.
 }
 
 // needed by shardkv tester
@@ -314,9 +313,8 @@ func (sc *ShardCtrler) ingestCommand(index int, command interface{}) {
 	if ch, ok := sc.resultCh[index]; ok { 
 		//DPrintf("%d current cofig: %v", sc.me, sc.configs)
 		ch <- result
+		delete(sc.resultCh, index)
 	}
-
-	delete(sc.resultCh, index)
 }
 
 // create a new configuration that includes the same replica groups as last config.
