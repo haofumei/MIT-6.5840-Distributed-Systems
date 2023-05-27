@@ -6,8 +6,6 @@ package shardkv
 // Shardctrler decides which group serves each shard.
 // Shardctrler may change shard assignment from time to time.
 //
-// You will have to modify these definitions.
-//
 
 const (
 	OK             = "OK"
