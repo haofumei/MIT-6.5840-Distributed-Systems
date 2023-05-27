@@ -15,60 +15,65 @@
 
 ## Test result:
 
+Environment:
+
+13‑inch M2 MacBook Pro,  8GB unified memory,  256GB SSD storage.
+
 ```
 Test: one client (3A) ...
 labgob warning: Decoding into a non-default variable/field Err may not work
-  ... Passed --  15.1  5 35275 7051
+  ... Passed --  15.1  5 33315 6654
 Test: ops complete fast enough (3A) ...
-  ... Passed --   1.0  3  3017    0
+  ... Passed --   1.1  3  3030    0
 Test: many clients (3A) ...
-  ... Passed --  15.1  5 26061 9079
+  ... Passed --  15.1  5 23392 8303
 Test: unreliable net, many clients (3A) ...
-  ... Passed --  15.9  5 10034 1767
+  ... Passed --  16.0  5  8003 1373
 Test: concurrent append to same key, unreliable (3A) ...
-  ... Passed --   1.1  3   199   52
+  ... Passed --   1.9  3   229   52
 Test: progress in majority (3A) ...
-  ... Passed --   0.6  5    68    2
+  ... Passed --   0.6  5    52    2
 Test: no progress in minority (3A) ...
-  ... Passed --   1.0  5   102    3
+  ... Passed --   1.0  5   104    3
 Test: completion after heal (3A) ...
-  ... Passed --   1.0  5    56    3
+  ... Passed --   1.0  5    53    3
 Test: partitions, one client (3A) ...
-  ... Passed --  22.8  5 24876 4786
+  ... Passed --  22.4  5 24241 4704
 Test: partitions, many clients (3A) ...
-  ... Passed --  22.3  5 79828 7307
+  ... Passed --  22.8  5 19688 6377
 Test: restarts, one client (3A) ...
-  ... Passed --  21.8  5 79038 6739
+  ... Passed --  20.2  5 30595 6065
 Test: restarts, many clients (3A) ...
-  ... Passed --  23.0  5 206946 9075
+  ... Passed --  20.2  5 23871 8346
 Test: unreliable net, restarts, many clients (3A) ...
-  ... Passed --  23.0  5 11069 1722
+  ... Passed --  21.5  5  8369 1327
 Test: restarts, partitions, many clients (3A) ...
-  ... Passed --  27.5  5 119099 6802
+  ... Passed --  27.2  5 22942 7505
 Test: unreliable net, restarts, partitions, many clients (3A) ...
-  ... Passed --  28.8  5  8600 1163
+  ... Passed --  28.8  5  6115  799
 Test: unreliable net, restarts, partitions, random keys, many clients (3A) ...
-  ... Passed --  31.0  7 27516 2736
+  ... Passed --  30.4  7 18719 1627
 Test: InstallSnapshot RPC (3B) ...
-  ... Passed --   2.5  3   318   63
+  ... Passed --   3.4  3   334   63
 Test: snapshot size is reasonable (3B) ...
-  ... Passed --   0.7  3  2411  800
+  ... Passed --   0.7  3  2534  800
 Test: ops complete fast enough (3B) ...
-  ... Passed --   0.8  3  3054    0
+  ... Passed --   0.8  3  3029    0
 Test: restarts, snapshots, one client (3B) ...
-  ... Passed --  25.8  5 382570 69024
+info: linearizability check timed out, assuming history is ok
+  ... Passed --  23.4  5 295753 58896
 Test: restarts, snapshots, many clients (3B) ...
-  ... Passed --  23.4  5 669609 137057
+  ... Passed --  20.4  5 386581 110351
 Test: unreliable net, snapshots, many clients (3B) ...
-  ... Passed --  15.7  5 11484 1834
+  ... Passed --  16.1  5  8992 1419
 Test: unreliable net, restarts, snapshots, many clients (3B) ...
-  ... Passed --  22.7  5 12895 1872
+  ... Passed --  21.0  5  9910 1487
 Test: unreliable net, restarts, partitions, snapshots, many clients (3B) ...
-  ... Passed --  28.5  5  8465 1156
+  ... Passed --  29.9  5  6917  854
 Test: unreliable net, restarts, partitions, snapshots, random keys, many clients (3B) ...
-  ... Passed --  29.2  7 36682 3614
+  ... Passed --  31.4  7 28921 2806
 PASS
-ok  	6.5840/kvraft	401.111s
+ok  	6.5840/kvraft	393.188s
 ```
 
 ## Later work:
