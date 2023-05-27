@@ -299,7 +299,7 @@ func (rf *Raft) applier(applyCh chan<- ApplyMsg) {
 				Command:      rf.log[rf.getCut(rf.lastApplied)].Command,
 				CommandIndex: rf.lastApplied,
 			}
-			DPrintf("%d try to apply %v", rf.me, msg)
+			
 			rf.mu.Unlock()
 			
 			applyCh <- msg
@@ -598,20 +598,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.Term < rf.currentTerm { // refuse lower term request
+	switch {
+	// refuse lower term request
+	case args.Term < rf.currentTerm: 
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
-	}
-
-	signalCh(rf.heartbeat, true) // if args.Term >= rf.currentTerm
-
 	// if args.Term == rf.currentTerm, we should not set votedFor = -1
 	// since every term, every server should only vote for one candidate
-	// and here this candidate has voted itself
-	rf.currentTerm = args.Term
-	rf.convertToFollower()
-	rf.persist(nil)
+	case args.Term == rf.currentTerm:
+		if rf.currentState != follower {
+			rf.currentState = follower
+			signalCh(rf.convertToF, true)
+		} else {
+			signalCh(rf.heartbeat, true)
+		}
+	case args.Term > rf.currentTerm:
+		if rf.currentState == follower {
+			signalCh(rf.heartbeat, true)
+		}
+		rf.currentTerm = args.Term
+		rf.convertToFollower()
+		rf.persist(nil)
+	}
 
 	reply.XLen = rf.getUncut(len(rf.log)) // always return full length to update snapshot
 
@@ -630,6 +639,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.XTerm = rf.getTermAt(args.PrevLogIndex)
 		reply.XIndex = rf.getUncut(leftBound(rf.log, reply.XTerm))
 	} else { // PrevLogTerm matches
+		reply.Success = true
+		reply.Term = rf.currentTerm
+
 		if len(args.Entries) > 0 { // append entries into log if not heartbeat
 			// If an existing entry conflicts with a new one (same index but different terms),
 			// delete the existing entry and all that follow it
@@ -658,10 +670,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
 			signalCh(rf.applyTrigger, true) // apply log
 		}
-		reply.Success = true
-		reply.Term = rf.currentTerm
 	}
-
 }
 
 // Send one AppendEntries request to the server.
